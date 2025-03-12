@@ -188,8 +188,7 @@ void WebServer::timer(int connfd, struct sockaddr_in client_address){
 // 并对新的定时器在链表上的位置进行调整
 void WebServer::adjust_timer(util_timer *timer){
     time_t cur = time(NULL);
-    timer->expire = cur + 3 * TIMESLOT;
-    utils.m_timer_lst.adjust_timer(timer);
+    utils.m_timer_lst.adjust_timer(timer, cur + 3 * TIMESLOT);
 
     LOG_INFO("%s", "adjust timer once");
 }

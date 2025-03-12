@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <time.h>
+#include <set>
 #include "../log/log.h"
 
 class util_timer;
@@ -33,15 +34,21 @@ struct client_data{
 
 class util_timer{
 public:
-    util_timer() : prev(NULL), next(NULL) {}
+    util_timer() {}
 
 public:
     time_t expire;
 
     void (* cb_func)(client_data *);
     client_data *user_data;
-    util_timer *prev;
-    util_timer *next;
+
+};
+
+
+struct TimerCmp {
+    bool operator()(const util_timer* a, const util_timer* b) const {
+        return a->expire < b->expire;  // 让set按expire从小到大排序
+    }
 };
 
 class sort_timer_lst{
@@ -50,15 +57,12 @@ public:
     ~sort_timer_lst();
     
     void add_timer(util_timer *timer);
-    void adjust_timer(util_timer *timer);
+    void adjust_timer(util_timer *timer, time_t new_expire);
     void del_timer(util_timer *timer);
     void tick();
 
 private:
-    void add_timer(util_timer *timer, util_timer *lst_head);
-
-    util_timer *head;
-    util_timer *tail;
+    std::set<util_timer*, TimerCmp> timers_set;
 };
 
 class Utils{

@@ -1,113 +1,44 @@
 #include "lst_timer.h"
 #include "../http/http_conn.h"
 
-sort_timer_lst::sort_timer_lst(){
-    head = NULL;
-    tail = NULL;
-}
+sort_timer_lst::sort_timer_lst(){}
 
+// 析构函数，删除所有定时器，防止内存泄漏
 sort_timer_lst::~sort_timer_lst(){
-    util_timer *tmp = head;
-    while (tmp){
-        head = tmp->next;
-        delete tmp;
-        tmp = head;
+    for(auto timer : timers_set){
+        delete timer;
     }
 }
 
 void sort_timer_lst::add_timer(util_timer *timer){
-    if (!timer)
-        return;
-    if (!head){
-        head = tail = timer;
-        return;
-    }
-    util_timer *tmp = head;
-    while (tmp){
-        if (timer->expire < tmp->expire){
-            util_timer *PREV = tmp->prev;
-            timer->prev = tmp->prev;
-            timer->next = tmp;
-            if (PREV)
-                PREV->next = timer;
-            tmp->prev = timer;
-            break;
-        }
-        tmp = tmp->next;
-    }
-    // timer的时间在队列中是最大的
-    if (!tmp){
-        tail->next = timer;
-        timer->prev = tail;
-        timer->next = NULL;
-        tail = timer;
-    }
+    if (!timer) return;
+    timers_set.insert(timer);
 }
 
-void sort_timer_lst::adjust_timer(util_timer *timer){
-    if (!timer)
-        return;
-    util_timer *tmp = timer->next;
-    if (!tmp || (timer->expire < tmp->expire))
-        return;
-    // 假如该timer不是有序的了 就删除再添加
-    if (timer == head){
-        head = timer->next;
-        head->prev = NULL;
-        timer->next = NULL;
-        add_timer(timer);
-    }
-    else{
-        timer->prev->next = timer->next;
-        timer->next->prev = timer->prev;
-        timer->prev = NULL;
-        timer->next = NULL;
-        add_timer(timer);
-    }
+void sort_timer_lst::adjust_timer(util_timer *timer, time_t new_expire){
+    if (!timer) return;
+    timers_set.erase(timer);
+    timer->expire = new_expire;
+    timers_set.insert(timer);
 }
 
 void sort_timer_lst::del_timer(util_timer *timer){
-    if (!timer)
-        return;
-    if ((timer == head) && (timer == tail)){
-        delete timer;
-        head = NULL;
-        tail = NULL;
-        return;
-    }
-    if (timer == head){
-        head = head->next;
-        head->prev = NULL;
-        delete timer;
-        return;
-    }
-    if (timer == tail){
-        tail = tail->prev;
-        tail->next = NULL;
-        delete timer;
-        return;
-    }
-    timer->prev->next = timer->next;
-    timer->next->prev = timer->prev;
+    if (!timer) return;
+    timers_set.erase(timer);
     delete timer;
 }
 
 // 遍历链表，如果定时器的过期时间小于当前时间，则触发定时器的回调函数并删除到期定时器
 void sort_timer_lst::tick(){
-    if (!head)
-        return;
-    time_t cur = time(NULL);
-    util_timer *tmp = head;
-    while (tmp){
-        if (tmp->expire > cur)
-            break;
-        tmp->cb_func(tmp->user_data);
-        head = tmp->next;
-        if (head)
-            head->prev = NULL;
-        delete tmp;
-        tmp = head;
-    }
+   if (timers_set.empty()) return;
+   time_t cur = time(nullptr);
+   while (!timers_set.empty()){
+        auto it = timers_set.begin();
+        if ((*it)->expire > cur) break;
+        (*it)->cb_func((*it)->user_data);
+        delete *it;
+        timers_set.erase(it);
+   }
 }
 
 void Utils::init(int timeslot){
