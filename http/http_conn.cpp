@@ -325,7 +325,6 @@ http_conn::HTTP_CODE http_conn::process_read(){
     while ((m_check_state == CHECK_STATE_CONTENT && flag) || (line_status = parse_line()) == LINE_OK){
         text = get_line();
         m_start_line = m_checked_idx; // 这行已经完整写入缓存区，更新下一个轮到解析行的位置
-        LOG_INFO("%s", text);
         switch (m_check_state){
         case CHECK_STATE_REQUESTLINE:{
             ret = parse_request_line(text);
@@ -509,7 +508,6 @@ bool http_conn::add_response(const char *format, ...){
     m_write_idx += len;
     va_end(arg_list);
 
-    LOG_INFO("request: %s", m_write_buf);
     return true;
 }
 
@@ -614,6 +612,9 @@ void http_conn::process(){
     if (!write_ret)
         close_conn();
     modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+
+    // 后期可以考虑添加一个如Nginx的access日志，形式如下
+    // 127.0.0.1 - - [10/Nov/2025:10:30:00 +0800] "GET /index.html HTTP/1.1" 200 1024
 }
 
 // 从写缓存区传输到客户端socket

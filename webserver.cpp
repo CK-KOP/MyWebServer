@@ -73,9 +73,9 @@ void WebServer::log_write(){
     // 不关闭日志则运行
     if (0 == m_close_log){
         // 异步日志，创建日志队列 + 独立日志线程
-        // 五个参数，最后一个是日志中的阻塞队列最大长度，设置了则代表要异步日志
+        // 五个参数，最后一个代表是否使用异步日志
         if (1 == m_log_write)
-            Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 800);    
+            Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 1);    
         // 同步日志，每次调用 write_log() 直接写文件
         else
             Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 0);
@@ -198,7 +198,7 @@ void WebServer::deal_timer(util_timer *timer, int sockfd){
     if (timer)
         utils.m_timer_lst.del_timer(timer);
 
-    LOG_INFO("close fd %d", users_client_data[sockfd].sockfd);
+    LOG_DEBUG("close fd %d", users_client_data[sockfd].sockfd);
 }
 
 // 处理新客户端连接
@@ -209,7 +209,7 @@ bool WebServer::dealclientdata(){
     if (0 == m_LISTENTrigmode){  // LT模式
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlenth);
         if (connfd < 0){
-            LOG_ERROR("accept error: %d", errno);
+            LOG_ERROR("LT accept error: %d", errno);
             return false;
         }
         if (http_conn::m_user_count >= MAX_FD){
@@ -224,7 +224,7 @@ bool WebServer::dealclientdata(){
             if (connfd < 0){
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                     break;  // accept已经读取不到连接了，正常结束
-                LOG_ERROR("accept error: %d", errno);
+                LOG_ERROR("ET accept error: %d", errno);
                 return false;
             }
             if (http_conn::m_user_count >= MAX_FD){
@@ -266,7 +266,9 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server){
 
 void WebServer::dealwithread(int sockfd){
     util_timer *timer = users_client_data[sockfd].timer;
-    //printf("开始处理读数据\n");
+    // 日志记录ip地址
+    LOG_DEBUG("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+    
     // reactor  数据由线程读入
     if (1 == m_actormodel){
         if (timer)
@@ -289,8 +291,6 @@ void WebServer::dealwithread(int sockfd){
     // proactor 数据读入之后再交给线程处理
     else{
         if (users[sockfd].read_once()){
-            // 日志记录ip地址
-            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
 
             // 若监测到读事件，将该事件放入请求队列
             m_pool->append_p(users + sockfd);
@@ -305,6 +305,8 @@ void WebServer::dealwithread(int sockfd){
 
 void WebServer::dealwithwrite(int sockfd){
     util_timer *timer = users_client_data[sockfd].timer;
+
+    LOG_DEBUG("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
 
     // reactor
     if (1 == m_actormodel){
@@ -327,7 +329,6 @@ void WebServer::dealwithwrite(int sockfd){
     // proactor
     else{
         if (users[sockfd].write()){
-            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
 
             if (timer)
                 adjust_timer(timer);
@@ -387,7 +388,7 @@ void WebServer::eventLoop(){
         }
         if (timeout){
            utils.timer_handler();
-           LOG_INFO("%s", "timer tick");
+           LOG_DEBUG("%s", "timer tick");
            timeout = false;
         }
     }
