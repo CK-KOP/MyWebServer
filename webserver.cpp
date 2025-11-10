@@ -14,7 +14,7 @@ WebServer::WebServer(){
     strcat(m_root, root);
 
     // 包含了该客户端对象的地址、标志符、对应的定时器指针
-    users_timer = new client_data[MAX_FD];
+    users_client_data = new client_data[MAX_FD];
 }
 
 WebServer::~WebServer(){
@@ -23,7 +23,7 @@ WebServer::~WebServer(){
     close(m_pipefd[1]);
     close(m_pipefd[0]);
     delete[] users;
-    delete[] users_timer;
+    delete[] users_client_data;
     delete m_pool;
 }
 
@@ -122,6 +122,7 @@ void WebServer::eventListen(){
     address.sin_port = htons(m_port);
 
     // 初始化服务器地址结构
+    // SO_REUSEADDR：重启服务器时，可以快速绑定同一个端口
     int flag = 1;
     setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
     
@@ -159,7 +160,7 @@ void WebServer::eventListen(){
     utils.addsig(SIGPIPE, SIG_IGN);
     utils.addsig(SIGALRM, utils.sig_handler, false);
     utils.addsig(SIGTERM, utils.sig_handler, false);
-    alarm(TIMESLOT);
+    alarm(TIMESLOT); // 用信号来保证定时检查定时器的情况
 
     // 工具类,信号和描述符基础操作
     Utils::u_pipefd = m_pipefd;
@@ -171,35 +172,33 @@ void WebServer::timer(int connfd, struct sockaddr_in client_address){
     // http类
     users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
 
-    // 虽然是users_timer，但其实是client_data类，里面包含了用客户端信息以及定时器的指针
+    // 虽然是users_client_data，但其实是client_data类，里面包含了用客户端信息以及定时器的指针
     // 创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
-    users_timer[connfd].address = client_address;
-    users_timer[connfd].sockfd = connfd;
+    users_client_data[connfd].address = client_address;
+    users_client_data[connfd].sockfd = connfd;
     util_timer *timer = new util_timer;
-    timer->user_data = &users_timer[connfd];
+    timer->user_data = &users_client_data[connfd];
     timer->cb_func = cb_func;
     time_t cur = time(NULL);
     timer->expire = cur + 3 * TIMESLOT;
-    users_timer[connfd].timer = timer;
+    timer->last_active = cur;
+    users_client_data[connfd].timer = timer;
     utils.m_timer_lst.add_timer(timer);
 }
 
-// 若有数据传输，则将定时器往后延迟3个单位
-// 并对新的定时器在链表上的位置进行调整
+// 若有数据传输，不直接修改定时器容器，而是更新该定时器的最新活跃时间
 void WebServer::adjust_timer(util_timer *timer){
     time_t cur = time(NULL);
-    utils.m_timer_lst.adjust_timer(timer, cur + 3 * TIMESLOT);
-
-    LOG_INFO("%s", "adjust timer once");
+    utils.m_timer_lst.adjust_timer(timer, cur);
 }
 
 // 关闭超时连接
 void WebServer::deal_timer(util_timer *timer, int sockfd){
-    timer->cb_func(&users_timer[sockfd]);
+    timer->cb_func(&users_client_data[sockfd]);
     if (timer)
         utils.m_timer_lst.del_timer(timer);
 
-    LOG_INFO("close fd %d", users_timer[sockfd].sockfd);
+    LOG_INFO("close fd %d", users_client_data[sockfd].sockfd);
 }
 
 // 处理新客户端连接
@@ -266,7 +265,7 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server){
 }
 
 void WebServer::dealwithread(int sockfd){
-    util_timer *timer = users_timer[sockfd].timer;
+    util_timer *timer = users_client_data[sockfd].timer;
     //printf("开始处理读数据\n");
     // reactor  数据由线程读入
     if (1 == m_actormodel){
@@ -305,7 +304,7 @@ void WebServer::dealwithread(int sockfd){
 }
 
 void WebServer::dealwithwrite(int sockfd){
-    util_timer *timer = users_timer[sockfd].timer;
+    util_timer *timer = users_client_data[sockfd].timer;
 
     // reactor
     if (1 == m_actormodel){
@@ -365,7 +364,7 @@ void WebServer::eventLoop(){
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
                 //printf("类型为连接异常\n");
                 // 服务器端关闭连接，移除对应的定时器
-                util_timer * timer = users_timer[sockfd].timer;
+                util_timer * timer = users_client_data[sockfd].timer;
                 deal_timer(timer, sockfd);
             }
             // 处理信号，来自管道的读端 m_pipefd[0] 且是可读事件

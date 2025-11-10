@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <time.h>
+#include <vector>
 #include <set>
 #include "../log/log.h"
 
@@ -28,8 +29,8 @@ class util_timer;
 
 struct client_data{
     sockaddr_in address;
-    int sockfd;
-    util_timer *timer;
+    int sockfd;         // 为什么还要保存fd，是因为这个对象也许不是通过fd下标访问的，可能是定时器的指针访问到的
+    util_timer *timer;  // 指向定时器是为了通过fd管理到这个客户端的定时器
 };
 
 class util_timer{
@@ -38,9 +39,9 @@ public:
 
 public:
     time_t expire;
-
+    time_t last_active; // 最近活跃时间
     void (* cb_func)(client_data *);
-    client_data *user_data;
+    client_data *user_data;    // 以便定时器需要销毁的时候顺便清理该连接
 
 };
 
@@ -57,9 +58,12 @@ public:
     ~sort_timer_lst();
     
     void add_timer(util_timer *timer);
-    void adjust_timer(util_timer *timer, time_t new_expire);
+    void adjust_timer(util_timer *timer, time_t new_last_active);
     void del_timer(util_timer *timer);
     void tick();
+
+    void set_timeslot(int timeslot);
+    int m_TIMESLOT; // 由 Utils类 初始化
 
 private:
     std::set<util_timer*, TimerCmp> timers_set;
@@ -93,7 +97,7 @@ public:
     static int *u_pipefd;
     sort_timer_lst m_timer_lst;
     static int u_epollfd;
-    int m_TIMESLOT;
+    int m_TIMESLOT;  // 由 Weberver类初始化
 };
 
 void cb_func(client_data *user_data);

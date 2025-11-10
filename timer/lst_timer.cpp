@@ -10,16 +10,20 @@ sort_timer_lst::~sort_timer_lst(){
     }
 }
 
+void sort_timer_lst::set_timeslot(int timeslot){
+    m_TIMESLOT = timeslot;
+}
+
 void sort_timer_lst::add_timer(util_timer *timer){
     if (!timer) return;
     timers_set.insert(timer);
 }
 
-void sort_timer_lst::adjust_timer(util_timer *timer, time_t new_expire){
+void sort_timer_lst::adjust_timer(util_timer *timer, time_t new_last_active){
     if (!timer) return;
-    timers_set.erase(timer);
-    timer->expire = new_expire;
-    timers_set.insert(timer);
+    
+    // ✓ 只更新last_active，不调整set
+    timer->last_active = new_last_active;
 }
 
 void sort_timer_lst::del_timer(util_timer *timer){
@@ -28,17 +32,44 @@ void sort_timer_lst::del_timer(util_timer *timer){
     delete timer;
 }
 
-// 遍历链表，如果定时器的过期时间小于当前时间，则触发定时器的回调函数并删除到期定时器
+// 遍历set，如果定时器的过期时间小于当前时间，则触发定时器的回调函数并删除到期定时器
 void sort_timer_lst::tick(){
    if (timers_set.empty()) return;
    time_t cur = time(nullptr);
-   while (!timers_set.empty()){
+   
+    std::vector<util_timer*> to_update;  // 需要更新的
+    std::vector<util_timer*> to_delete;  // 需要删除的
+    
+    while (!timers_set.empty()){
         auto it = timers_set.begin();
-        if ((*it)->expire > cur) break;
-        (*it)->cb_func((*it)->user_data);
-        delete *it;
-        timers_set.erase(it);
-   }
+        util_timer* timer = *it;
+        
+        if (timer->expire > cur) break;
+        
+        timers_set.erase(it);  // 从set中清除，但是这块内存块没有被清理，所以还能使用，但是记得要释放
+        
+        // 检查是否还活跃
+        if (timer->last_active > 0 && 
+            cur - timer->last_active < 3 * m_TIMESLOT){  // 3 * TIMESLOT
+            // 延长时间
+            timer->expire = timer->last_active + 3 * m_TIMESLOT;
+            to_update.push_back(timer);
+        }
+        else{
+            to_delete.push_back(timer);
+        }
+    }
+    
+    // 重新插入更新的
+    for (auto timer : to_update){
+        timers_set.insert(timer);
+    }
+    
+    // 释放过期的
+    for (auto timer : to_delete){
+        timer->cb_func(timer->user_data);
+        delete timer;
+    }
 }
 
 void Utils::init(int timeslot){
@@ -115,3 +146,4 @@ void cb_func(client_data *user_data){
     close(user_data->sockfd);
     http_conn::m_user_count--;
 }
+

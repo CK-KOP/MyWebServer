@@ -57,7 +57,7 @@ public:
 
     int m_pipefd[2];
     int m_epollfd;
-    http_conn *users;
+    http_conn *users;   // 保存每个客户端的 HTTP 连接对象，每个对象对应一个 socket
 
     // 数据库相关
     connection_pool *m_connPool;
@@ -80,7 +80,7 @@ public:
     int m_CONNTrigmode;
 
     //定时器和工具相关
-    client_data *users_timer;
+    client_data *users_client_data; // 每个客户端对应的定时器信息，包含 socket、客户端地址以及 util_timer*
     Utils utils;
 };
 
