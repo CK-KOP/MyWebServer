@@ -206,36 +206,34 @@ void WebServer::deal_timer(util_timer *timer, int sockfd){
 bool WebServer::dealclientdata(){
     struct sockaddr_in client_address;
     socklen_t client_addrlenth = sizeof(client_address);
-    if (0 == m_LISTENTrigmode){
+    
+    if (0 == m_LISTENTrigmode){  // LT模式
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlenth);
-        //printf("LT新连接connfd: %d\n", connfd);
         if (connfd < 0){
-            LOG_ERROR("%s:errno is%d", "accept error", error);
+            LOG_ERROR("accept error: %d", errno);
             return false;
         }
         if (http_conn::m_user_count >= MAX_FD){
             utils.show_error(connfd, "Internal server busy");
-            LOG_ERROR("%s", "Internal server busy");
             return false;
         }
         timer(connfd, client_address);
     }
-    else{
+    else{  // ET模式
         while (1){
             int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlenth);
-            //printf("RT新连接connfd: %d\n", connfd);
             if (connfd < 0){
-                LOG_ERROR("%s:errno is%d", "accept error", error);
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    break;  // accept已经读取不到连接了，正常结束
+                LOG_ERROR("accept error: %d", errno);
                 return false;
             }
             if (http_conn::m_user_count >= MAX_FD){
                 utils.show_error(connfd, "Internal server busy");
-                LOG_ERROR("%s", "Internal server busy");
-                return false;
+                continue;  // 继续接受其他连接
             }
             timer(connfd, client_address);
         }
-        return false;
     }
     return true;
 }
