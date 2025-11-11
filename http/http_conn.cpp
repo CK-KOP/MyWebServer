@@ -123,31 +123,28 @@ void http_conn::init(int sockfd, const sockaddr_in &addr, char *root, int TRIGMo
 // check_state默认为分析请求行状态
 void http_conn::init(){
     m_read_idx = 0;
-    m_checked_idx = 0;
-    m_start_line = 0;
     m_write_idx = 0;
     
-    m_check_state = CHECK_STATE_REQUESTLINE;   // 默认检查请求行状态
-    m_method = GET;				// 默认请求方法为 GET
-    
-    m_url = 0;
-    m_version = 0;
-    m_host = 0;
+    m_method = GET;
+    m_url = m_url_buf;
+    m_host = m_host_buf;
     m_content_length = 0;
-    m_linger = false;			        // 默认不使用长连接
+    m_linger = false;
     
-    cgi = 0;        // 默认不使用 CGI
+    cgi = 0;
     bytes_to_send = 0;
     bytes_have_send = 0;
     
     mysql = NULL;
-    m_state = 0;    // 读写
-    timer_flag = 0; // 是否需要定时调整
-    improv = 0;     // 是否被尝试读入或写入过
+    m_state = 0;
+    timer_flag = 0;
+    improv = 0;
     
-    memset(m_read_buf, '\0', READ_BUFFER_SIZE);    // 清空读取缓冲区
-    memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);  // 清空写入缓冲区	
-    memset(m_real_file, '\0', FILENAME_LEN);	     // 清空真实文件路径
+    memset(m_read_buf, '\0', READ_BUFFER_SIZE);
+    memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
+    memset(m_real_file, '\0', FILENAME_LEN);
+    memset(m_url_buf, '\0', FILENAME_LEN);
+    memset(m_host_buf, '\0', 256);
 }
 
 
@@ -187,175 +184,172 @@ bool http_conn::read_once(){
     
 }
 
-
-// 从状态机，用于分析出一行内容
-// 返回值为行的读取状态，有LINE_OK,LINE_BAD,LINE_OPEN
-http_conn::LINE_STATUS http_conn::parse_line(){
-    char tmp;
-    for (; m_checked_idx < m_read_idx; m_checked_idx++){
-        tmp = m_read_buf[m_checked_idx];
-        // 假如是'\r' 如果后面紧跟'\n'则OK; '\n'还没被读进来则OPEN; 否则BAD
-        if (tmp == '\r'){
-            if (m_checked_idx + 1 == m_read_idx)
-                return LINE_OPEN;
-            else if(m_read_buf[m_checked_idx + 1] == '\n'){
-                m_read_buf[m_checked_idx++] = '\0';
-                m_read_buf[m_checked_idx++] = '\0';
-                return LINE_OK;
-            }
-            return LINE_BAD;
+// ============ 解析方法 ============
+bool http_conn::parse_method(const char *method, size_t len) {
+    // 用简单的比较替代 strcasecmp，更快
+    if (len == 3) {
+        if (method[0] == 'G' && method[1] == 'E' && method[2] == 'T') {
+            m_method = GET;
+            cgi = 0;
+            return true;
         }
-        // 同理检查前面是否为'\r' 是则OK，否则BAD
-        else if(tmp == '\n'){
-            if (m_checked_idx > 1 && m_read_buf[m_checked_idx - 1] == '\r'){
-                m_read_buf[m_checked_idx - 1] = '\0';
-                m_read_buf[m_checked_idx++] = '\0';
-                return LINE_OK;
-            }
-            return LINE_BAD;
+        if (method[0] == 'g' && method[1] == 'e' && method[2] == 't') {
+            m_method = GET;
+            cgi = 0;
+            return true;
         }
     }
-    return LINE_OPEN;
+    if (len == 4) {
+        if ((method[0] == 'P' || method[0] == 'p') &&
+            (method[1] == 'O' || method[1] == 'o') &&
+            (method[2] == 'S' || method[2] == 's') &&
+            (method[3] == 'T' || method[3] == 't')) {
+            m_method = POST;
+            cgi = 1;
+            return true;
+        }
+        if ((method[0] == 'H' || method[0] == 'h') &&
+            (method[1] == 'E' || method[1] == 'e') &&
+            (method[2] == 'A' || method[2] == 'a') &&
+            (method[3] == 'D' || method[3] == 'd')) {
+            m_method = HEAD;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============ 解析URL ============
+bool http_conn::parse_url(const char *path, size_t len) {
+    if (len == 0 || len >= FILENAME_LEN - 20)  // 留点空间给后面可能的拼接
+        return false;
+    
+    // picohttpparser 已经帮我们处理好了，直接是路径部分
+    memcpy(m_url_buf, path, len);
+    m_url_buf[len] = '\0';
+    
+    // 处理根路径
+    if (len == 1 && m_url_buf[0] == '/') {
+        strcat(m_url_buf, "judge.html");
+    }
+    
+    return true;
+}
+
+// ============ 解析Headers ============
+bool http_conn::parse_headers(struct phr_header *headers, size_t num) {
+    m_content_length = 0;
+    m_linger = false;
+    m_host_buf[0] = '\0';
+    
+    for (size_t i = 0; i < num; i++) {
+        size_t name_len = headers[i].name_len;
+        size_t value_len = headers[i].value_len;
+        
+        // 优化：先比较长度再比较内容
+        if (name_len == 10) {  // "Connection"
+            if (strncasecmp(headers[i].name, "Connection", 10) == 0) {
+                if (value_len == 10 && 
+                    strncasecmp(headers[i].value, "keep-alive", 10) == 0) {
+                    m_linger = true;
+                }
+            }
+        }
+        else if (name_len == 14) {  // "Content-Length"
+            if (strncasecmp(headers[i].name, "Content-Length", 14) == 0) {
+                // 手动转换（value不是null结尾的）
+                m_content_length = 0;
+                for (size_t j = 0; j < value_len && j < 20; j++) {
+                    char c = headers[i].value[j];
+                    if (c >= '0' && c <= '9') {
+                        m_content_length = m_content_length * 10 + (c - '0');
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        else if (name_len == 4) {  // "Host"
+            if (strncasecmp(headers[i].name, "Host", 4) == 0) {
+                size_t copy_len = value_len < 255 ? value_len : 255;
+                memcpy(m_host_buf, headers[i].value, copy_len);
+                m_host_buf[copy_len] = '\0';
+            }
+        }
+    }
+    return true;
 }
 
 
-
-// 解析http请求行，获得请求方法，目标url及http版本号
-http_conn::HTTP_CODE http_conn::parse_request_line(char *text){
-    m_url = strpbrk(text, " \t");
-    if (!m_url)
-        return BAD_REQUEST;
-    *m_url++ = '\0';    // 隔断请求方法
+// ============ 主解析函数 ============
+http_conn::HTTP_CODE http_conn::process_read() {
+    const char *method, *path;
+    size_t method_len, path_len;
+    int minor_version;
+    struct phr_header headers[MAX_HEADERS];
+    size_t num_headers = MAX_HEADERS;
     
-    char *method = text; //获取请求方法
-    if (strcasecmp(method, "GET") == 0)
-        m_method = GET;
-    else if (strcasecmp(method, "POST") == 0){
-        m_method = POST;
-        cgi = 1;
+    // 调用 picohttpparser
+    int pret = phr_parse_request(
+        m_read_buf, m_read_idx,
+        &method, &method_len,
+        &path, &path_len,
+        &minor_version,
+        headers, &num_headers,
+        0
+    );
+    
+    if (pret == -1) {
+        LOG_ERROR("HTTP parse error");
+        return BAD_REQUEST;
     }
-    else
-        return BAD_REQUEST;
     
-    m_url += strspn(m_url, " \t"); // 获取URL
-    m_version = strpbrk(m_url, " \t");
-    if (!m_version)
-        return BAD_REQUEST;
-    *m_version++ = '\0';
-
-    m_version += strspn(m_version, " \t"); // 获取HTTP版本
-    if (strcasecmp(m_version, "HTTP/1.1") != 0)
-        return BAD_REQUEST;
-    
-    if (strncasecmp(m_url, "http://", 7) == 0){  // 处理URL格式
-        m_url += 7;
-        m_url = strchr(m_url, '/'); // 跳过这些前缀，并找到后面的第一个'/'字符
+    if (pret == -2) {
+        return NO_REQUEST;  // 需要更多数据
     }
-    if (strncasecmp(m_url, "https://", 8) == 0){
-        m_url += 8;
-        m_url = strchr(m_url, '/'); // 跳过这些前缀，并找到后面的第一个'/'字符
-    }
-
-    if (!m_url || m_url[0] != '/')  // URL有效性检查
-        return BAD_REQUEST;
     
-    if (strlen(m_url) == 1)         // 当url为/时，显示判断界面
-        strcat(m_url, "judge.html");
-    m_check_state = CHECK_STATE_HEADER; // 状态机进入头部解析状态
-    return NO_REQUEST;                  // 请求尚未解析完
-}
-
-// 解析http请求的一个头部信息
-http_conn::HTTP_CODE http_conn::parse_headers(char *text){
-    // 遇到空行，表示头部解析完毕
-    if (text[0] == '\0'){
-        // content_length 不为0，还有信息需要解析
-        if (m_content_length != 0){
-            m_check_state = CHECK_STATE_CONTENT;
+    // 解析成功，pret 是 header 结束位置
+    
+    // 提取方法
+    if (!parse_method(method, method_len)) {
+        LOG_ERROR("Unsupported method");
+        return BAD_REQUEST;
+    }
+    
+    // 提取 URL
+    if (!parse_url(path, path_len)) {
+        LOG_ERROR("Invalid URL");
+        return BAD_REQUEST;
+    }
+    
+    // 提取 headers
+    parse_headers(headers, num_headers);
+    
+    // 检查 HTTP 版本 (minor_version: 0->1.0, 1->1.1)
+    if (minor_version != 1 && minor_version != 0) {
+        LOG_ERROR("Unsupported HTTP version");
+        return BAD_REQUEST;
+    }
+    
+    // POST 请求需要检查 body
+    if (m_method == POST && m_content_length > 0) {
+        size_t body_start = pret;
+        size_t total_needed = body_start + m_content_length;
+        
+        // body 不完整
+        if (m_read_idx < total_needed) {
             return NO_REQUEST;
         }
-        return GET_REQUEST;
+        
+        // 提取 body
+        m_string = m_read_buf + body_start;
+        // 确保字符串结尾
+        if (total_needed < READ_BUFFER_SIZE) {
+            m_read_buf[total_needed] = '\0';
+        }
     }
-    else if (strncasecmp(text, "Connection:", 11) == 0){
-        text += 11;
-        text += strspn(text, " \t");
-        if (strcasecmp(text, "keep-alive") == 0)
-            m_linger = true;
-    }
-    else if (strncasecmp(text, "Content-length:", 15) == 0){
-        text += 15;
-        text += strspn(text, " \t");
-        m_content_length = atol(text);
-    }
-    else if (strncasecmp(text, "Host:", 5) == 0){
-        text += 5;
-        text += strspn(text, " \t");
-        m_host = text;
-    }
-    else{
-        LOG_INFO("oop!unknow header: %s", text);
-    }
-    return NO_REQUEST;
-}
-
-// 判断http请求是否被完整读入
-http_conn::HTTP_CODE http_conn::parse_content(char *text){
-    if (m_read_idx >= m_content_length + m_checked_idx){
-        text[m_content_length] = '\0';
-        // POST请求中最后为输入的用户名和密码
-        m_string = text;
-        return GET_REQUEST;
-    }
-    return NO_REQUEST;
-}
-
-
-
-// 从读缓冲区解析整体HTTP请求
-http_conn::HTTP_CODE http_conn::process_read(){
-    LINE_STATUS line_status = LINE_OK;
-    HTTP_CODE ret = NO_REQUEST;
-    char *text = 0;
-    // 用于判断是否尝试解析过请求内容，解析过后 无论对错都会退出
-    // 假如正确说明HTTP头全部被解析完了，假如错误说明还没读入完也要返回NO_REQUEST
-    int flag = 1; 
     
-    // 假如是刚尝试解析请求内容或者在缓冲区找到了一个完整行即可继续解析内容
-    // 因为POST里的请求内容是没有换行符的 所以不能用后者parse_line()判断是否找到了一个完整行
-    while ((m_check_state == CHECK_STATE_CONTENT && flag) || (line_status = parse_line()) == LINE_OK){
-        text = get_line();
-        m_start_line = m_checked_idx; // 这行已经完整写入缓存区，更新下一个轮到解析行的位置
-        switch (m_check_state){
-        case CHECK_STATE_REQUESTLINE:{
-            ret = parse_request_line(text);
-            if (ret == BAD_REQUEST){
-                //printf("--------------------------------------------------------\n");
-                return BAD_REQUEST;
-            }
-            break;
-        }
-        case CHECK_STATE_HEADER:{
-            ret = parse_headers(text);
-            if (ret == BAD_REQUEST){
-                //printf("/////////////////////////////////////////////////////////\n");
-                return BAD_REQUEST;
-            }
-            if (ret == GET_REQUEST)
-                return do_request();
-            break;
-        }
-        case CHECK_STATE_CONTENT:{
-            ret = parse_content(text);
-            if (ret == GET_REQUEST)
-                return do_request();
-            flag = 0;
-            break;
-        }
-        default:
-            return INTERNAL_ERROR;
-        }   
-    }
-    return NO_REQUEST;
+    return do_request();
 }
 
 
@@ -522,9 +516,6 @@ bool http_conn::add_headers(int content_len){
 }
 bool http_conn::add_content_length(int content_length){
     return add_response("Content-Length:%d\r\n", content_length);
-}
-bool http_conn::add_content_type(){
-    return add_response("Content-Type:%s\r\n", "text/html");
 }
 bool http_conn::add_linger(){
     return add_response("Connection:%s\r\n", (m_linger == true) ? "keep-alive" : "close");
