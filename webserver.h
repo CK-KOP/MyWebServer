@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <cassert>
 #include <sys/epoll.h>
+#include <queue>
 
 #include "./threadpool/threadpool.h"
 #include "./http/http_conn.h"
@@ -26,7 +27,7 @@ public:
     // 初始化
     void init(int port, string user, string passWord, string databaseName,
               int log_write, int opt_linger, int trigmode, int sql_num,
-              int thread_num, int close_log, int actor_model);
+              int thread_num, int close_log);
     void log_write();
     void sql_pool();
     void thread_pool();
@@ -53,7 +54,6 @@ public:
     char *m_root;
     int m_log_write;    // 日志方法 0为同步，1为异步
     int m_close_log;    // 是否关闭日志
-    int m_actormodel;   // Reactor/Proactor
 
     int m_pipefd[2];
     int m_epollfd;
@@ -81,7 +81,6 @@ public:
 
     //定时器和工具相关
     client_data *users_client_data; // 每个客户端对应的定时器信息，包含 socket、客户端地址以及 util_timer*
-    Utils utils;
 };
 
 #endif

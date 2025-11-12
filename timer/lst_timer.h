@@ -63,16 +63,23 @@ public:
     void tick();
 
     void set_timeslot(int timeslot);
-    int m_TIMESLOT; // 由 Utils类 初始化
 
 private:
     std::set<util_timer*, TimerCmp> timers_set;
+    int m_TIMESLOT; // 由 Utils类 初始化
 };
 
 class Utils{
 public:
-    Utils() {}
-    ~Utils() {}
+    static Utils& get_instance() {
+        static Utils instance;
+        return instance;
+    }
+
+    // 禁止拷贝与赋值
+    Utils(const Utils&) = delete;
+    Utils& operator=(const Utils&) = delete;
+
     
     void init(int timeslot);
     
@@ -98,6 +105,10 @@ public:
     sort_timer_lst m_timer_lst;
     static int u_epollfd;
     int m_TIMESLOT;  // 由 Weberver类初始化
+
+private:
+    Utils() {}  // 构造函数私有化
+    ~Utils() {}
 };
 
 void cb_func(client_data *user_data);
