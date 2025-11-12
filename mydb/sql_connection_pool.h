@@ -1,16 +1,13 @@
 #ifndef _CONNECTION_POOL_
 #define _CONNECTION_POOL_
 
-#include <stdio.h>
-#include <list>
 #include <mysql/mysql.h>
-#include <error.h>
-#include <string.h>
-#include <iostream>
 #include <string>
-#include "../lock/locker.h"
+#include <list>
+#include <mutex>
+#include <condition_variable>
 #include "../log/log.h"
-using namespace std;
+
 
 class connection_pool{
 public:
@@ -21,33 +18,49 @@ public:
 
     // 单例模式
     static connection_pool *GetInstance();
-    void init(string url, string User, string PassWord, string DataBaseName, int port, int MaxConn, int close_log);
+    void init(const std::string& url,
+        const std::string& user,
+        const std::string& password,
+        const std::string& dbName,
+        int port,
+        int maxConn,
+        int close_log);
 
 private:
     connection_pool();
     ~connection_pool();
 
-    int m_MaxConn;
-    int m_CurConn;
-    int m_FreeConn;
-    locker lock;
-    list<MYSQL *>connList;
-    sem reserve;
+    int m_MaxConn;                      // 最大连接数
+    int m_CurConn;                      // 当前使用的连接数
+    int m_FreeConn;                     // 当前空闲连接数
+    
+    std::list<MYSQL*> connList;         // 连接池容器
+
+    // ---------- 修改锁和条件变量 ----------
+    std::mutex mtx;                      // 保护 connList 和计数
+    std::condition_variable cv;          // 等待空闲连接
+    
 public:
-    string m_url;           // 主机开关
-    string m_Port;          // 数据库端口号
-    string m_User;          // 登陆数据库用户名
-    string m_PassWord;      // 登陆数据库密码
-    string m_DataBaseName;  //使用数据库名
+    std::string m_url;           // 主机开关
+    std::string m_Port;          // 数据库端口号
+    std::string m_User;          // 登陆数据库用户名
+    std::string m_PassWord;      // 登陆数据库密码
+    std::string m_DataBaseName;  //使用数据库名
     int m_close_log;        //日志开关
 };
 
-class connectionRAII{
-public:
-    connectionRAII(MYSQL **con, connection_pool *connPool);
-    ~connectionRAII();
-private:
-    MYSQL *conRAII;
-    connection_pool *poolRAII;
-};
+// RAII 连接管理类
+class ConnectionGuard {
+    public:
+        explicit ConnectionGuard(connection_pool& pool)
+            : pool_(pool), conn_(pool_.GetConnection()) {}
+        ~ConnectionGuard() { pool_.ReleaseConnection(conn_); }
+    
+        MYSQL* get() const { return conn_; }
+        MYSQL* operator->() const { return conn_; }
+    
+    private:
+        connection_pool& pool_;
+        MYSQL* conn_;
+    };
 #endif

@@ -15,13 +15,13 @@ const char *error_404_form = "The requested file was not found on this server.\n
 const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the request file.\n";
 
-locker m_lock;
-map<string, string>users;
+std::mutex m_mutex;
+std::map<std::string, std::string>users;
 
 void http_conn::initmysql_result(connection_pool *connPool){
     // 先从连接池中取一个连接
-    MYSQL *mysql = NULL;
-    connectionRAII mysqlcon(&mysql, connPool);
+    ConnectionGuard connGuard(*connPool);
+    MYSQL* mysql = connGuard.get();
 
     // 在user表中检索username，passwd数据，浏览器端输入
     if (mysql_query(mysql, "SELECT username,passwd FROM user"))
@@ -38,8 +38,8 @@ void http_conn::initmysql_result(connection_pool *connPool){
 
     // 从结果集中获取下一行，将对应的用户名和密码，存入map中
     while(MYSQL_ROW row = mysql_fetch_row(result)){
-        string temp1(row[0]);
-        string temp2(row[1]);
+        std::string temp1(row[0]);
+        std::string temp2(row[1]);
         users[temp1] = temp2;
     }
 }
@@ -104,7 +104,7 @@ void http_conn::close_conn(bool real_close){
 
 // 初始化连接,外部调用初始化套接字地址
 void http_conn::init(int sockfd, const sockaddr_in &addr, char *root, int TRIGMode,
-                     int close_log, string user, string passwd, string sqlname){
+                     int close_log, std::string user, std::string passwd, std::string sqlname){
     m_sockfd = sockfd;                          // 保存客户端的socket描述符
     m_address = addr;                           // 保存客户端地址
     addfd(m_epollfd, sockfd, true, m_TRIGMode); // 将客户端socket添加到epoll事件表中
@@ -394,10 +394,12 @@ http_conn::HTTP_CODE http_conn::do_request(){
             strcat(sql_insert, "')");
 
             if (!users.count(name)){
-                m_lock.lock();
-                int res = mysql_query(mysql, sql_insert);
-                users.insert(pair<string, string>(name, password));
-                m_lock.unlock();
+                int res = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex); // 出作用域自动解锁
+                    res = mysql_query(mysql, sql_insert);
+                    users[name] = password; // std::map 插入
+                }
             
                 if (!res)
                     strcpy(m_url, "/log.html");

@@ -7,114 +7,97 @@
 #include <pthread.h>
 #include <iostream>
 #include "sql_connection_pool.h"
-using namespace std;
 
-connection_pool::connection_pool(){
-    m_CurConn = 0;
-    m_FreeConn = 0;
-}
+connection_pool::connection_pool() 
+    : m_CurConn(0), m_FreeConn(0), m_MaxConn(0) { }
 
-connection_pool *connection_pool::GetInstance(){
-    static connection_pool connPool;
-    return &connPool;
+connection_pool* connection_pool::GetInstance() {
+    static connection_pool instance;
+    return &instance;
 }
 
 // 构造初始化
-void connection_pool::init(string url, string User, string PassWord, string DBName, int port, int MaxConn, int close_log){
+void connection_pool::init(const std::string& url, const std::string& user, const std::string& password,
+                            const std::string& dbName, int port, int maxConn, int close_log){
     m_url = url;
 	m_Port = port;
-	m_User = User;
-	m_PassWord = PassWord;
-	m_DataBaseName = DBName;
+	m_User = user;
+	m_PassWord = password;
+	m_DataBaseName = dbName;
 	m_close_log = close_log;
 
-    for (int i = 0;i < MaxConn; i++){
-        MYSQL *con = NULL;
-        con = mysql_init(con);
+    for (int i = 0;i < maxConn; i++){
+        MYSQL* con = mysql_init(nullptr);
 
-        if (con == NULL){
-            LOG_ERROR("MySQL Error");
-            exit(1);
+        if (!con){
+            LOG_ERROR("MySQL Init Error");
+            throw std::runtime_error("MySQL Init Error");
         }
-        con = mysql_real_connect(con, url.c_str(), User.c_str(), PassWord.c_str(), DBName.c_str(), port, NULL, 0);
+        con = mysql_real_connect(con, url.c_str(), user.c_str(), password.c_str(), dbName.c_str(), port, NULL, 0);
         
-        if (con == NULL){
-            LOG_ERROR("MySQl Error");
-            exit(1);
+        if (!con){
+            LOG_ERROR("MySQL Connect Error");
+            throw std::runtime_error("MySQL Connect Error: " + std::string(mysql_error(con)));
         }
-        connList.push_back(con);
-        ++m_FreeConn;
+
+        // 用 lock_guard 简单保护 connList
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            connList.push_back(con);
+            ++m_FreeConn;
+        }
     }
-    reserve = sem(m_FreeConn);
+
     m_MaxConn = m_FreeConn;
 }
 
 // 当有请求时，从数据库连接池中返回一个可用连接，更新使用和空闲连接数
 MYSQL *connection_pool::GetConnection(){
-    MYSQL *con = NULL;
-    if (0 == connList.size())
-        return NULL;
-    // 使用信号量来等待可用的连接
-    reserve.wait();
-    
-    lock.lock();
+    std::unique_lock<std::mutex> lock(mtx);  // 条件变量等待需要 unique_lock
+    cv.wait(lock, [this] { return !connList.empty(); });
 
-    con = connList.front();
+    MYSQL* con = connList.front();
     connList.pop_front();
-
+    
     --m_FreeConn;
     ++m_CurConn;
 
-    lock.unlock();
     return con;
 }
 
 // 释放当前使用的连接
 bool connection_pool::ReleaseConnection(MYSQL *con){
-    if (con == NULL)
-        return false;
-    lock.lock();
+    if (!con) return false;
 
-    connList.push_back(con);
-    ++m_FreeConn;
-    --m_CurConn;
-
-    lock.unlock();
-    reserve.post();
+    {
+        std::lock_guard<std::mutex> lock(mtx);   // 临界区短，轻量用 lock_guard
+        connList.push_back(con);
+        --m_CurConn;
+        ++m_FreeConn;
+    }
+    cv.notify_one(); // 唤醒等待 GetConnection 的线程
     return true;
+}
+
+// 当前空闲连接数量
+int connection_pool::GetFreeConn() {
+    std::lock_guard<std::mutex> lock(mtx);
+    return m_FreeConn;
 }
 
 // 销毁数据库连接池
 void connection_pool::DestoryPool(){
-    lock.lock();
-    if (connList.size() > 0){
-        list<MYSQL *>::iterator it;
-        for (it = connList.begin(); it != connList.end(); it++){
-            MYSQL *con = *it;
-            mysql_close(con);
-        }
-        m_CurConn = 0;
-        m_FreeConn = 0;
-        connList.clear();
+    std::lock_guard<std::mutex> lock(mtx);
+    for (auto con : connList){
+        if (con) mysql_close(con);
     }
-    lock.unlock();
+    connList.clear();
+    m_CurConn = 0;
+    m_FreeConn = 0;
 }
 
-// 当前空闲的连接数
-int connection_pool::GetFreeConn(){
-    return this->m_FreeConn;
-}
 
 connection_pool::~connection_pool(){
     DestoryPool();
 }
 
-connectionRAII::connectionRAII(MYSQL **SQL, connection_pool *connPool){
-    *SQL = connPool->GetConnection();
-    conRAII = *SQL;
-    poolRAII= connPool;
-}
-
-connectionRAII::~connectionRAII(){
-    poolRAII->ReleaseConnection(conRAII);
-}

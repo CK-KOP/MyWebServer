@@ -22,7 +22,6 @@
 #include <sys/uio.h>
 #include <map>
 
-#include "../lock/locker.h"
 #include "../mydb/sql_connection_pool.h"
 #include "../timer/lst_timer.h"
 #include "../log/log.h"
@@ -54,7 +53,7 @@ public:
 
 public:
     void init(int sockfd, const sockaddr_in &addr, char * root, int TRIGMode, 
-              int close_log, string user, string passwd, string sqlname);
+              int close_log, std::string user, std::string passwd, std::string sqlname);
     void initmysql_result(connection_pool * connPool);
     void close_conn(bool real_close = true);
     bool read_once();
@@ -130,7 +129,7 @@ private:
     
     // 配置
     char *doc_root;
-    map<string, string> m_users;
+    std::map<std::string, std::string> m_users;
     int m_TRIGMode;
     int m_close_log;
     char sql_user[100];
