@@ -35,42 +35,69 @@ void sort_timer_lst::del_timer(util_timer *timer){
 // 遍历set，如果定时器的过期时间小于当前时间，则触发定时器的回调函数并删除到期定时器
 void sort_timer_lst::tick(){
     if (timers_set.empty()) return;
+    
+    auto start = std::chrono::steady_clock::now();
     time_t cur = time(nullptr);
     
-     std::vector<util_timer*> to_update;  // 需要更新的
-     std::vector<util_timer*> to_delete;  // 需要删除的
-     
-     while (!timers_set.empty()){
-         auto it = timers_set.begin();
-         util_timer* timer = *it;
-         
-         if (timer->expire > cur) break;
-         
-         timers_set.erase(it);  // 从set中清除，但是这块内存块没有被清理，所以还能使用，但是记得要释放
-         
-         // 检查是否还活跃
-         if (timer->last_active > 0 && 
-             cur - timer->last_active < 3 * m_TIMESLOT){  // 3 * TIMESLOT
-             // 延长时间
-             timer->expire = timer->last_active + 3 * m_TIMESLOT;
-             to_update.push_back(timer);
-         }
-         else{
-             to_delete.push_back(timer);
-         }
-     }
-     
-     // 重新插入更新的
-     for (auto timer : to_update){
-         timers_set.insert(timer);
-     }
-     
-     // 释放过期的
-     for (auto timer : to_delete){
-         timer->cb_func(timer->user_data);
-         delete timer;
-     }
- }
+    std::vector<util_timer*> to_update;
+    std::vector<util_timer*> to_delete;
+    
+    int expired_count = 0;  // 统计过期的
+    int extended_count = 0;  // 统计延期的
+    
+    while (!timers_set.empty()){
+        auto it = timers_set.begin();
+        util_timer* timer = *it;
+        
+        if (timer->expire > cur) break;
+        
+        timers_set.erase(it);
+        expired_count++;
+        
+        if (timer->last_active > 0 && 
+            cur - timer->last_active < 3 * m_TIMESLOT){
+            timer->expire = timer->last_active + 3 * m_TIMESLOT;
+            to_update.push_back(timer);
+            extended_count++;
+        }
+        else{
+            to_delete.push_back(timer);
+        }
+    }
+    
+    for (auto timer : to_update){
+        timers_set.insert(timer);
+    }
+    
+    for (auto timer : to_delete){
+        timer->cb_func(timer->user_data);
+        delete timer;
+    }
+    
+    auto end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    
+    LOG_INFO("tick() - took %ld us, total_timers: %lu, expired: %d, extended: %d, deleted: %lu",
+             duration.count(), timers_set.size(), 
+             expired_count, extended_count, to_delete.size());
+
+    // 每隔一段时间输出一次统计
+    static int tick_count = 0;
+    static long total_us = 0;
+    static long max_us = 0;
+    
+    tick_count++;
+    total_us += duration.count();
+    if (duration.count() > max_us) max_us = duration.count();
+    
+    if (tick_count % 6 == 0) {  // 每6次tick（30s）输出一次
+        LOG_INFO("Timer stats - Count: %d, Avg: %ld us, Max: %ld us, "
+                 "Current timers: %lu, Expired: %d, Extended: %d, Deleted: %d",
+                 tick_count, total_us / tick_count, max_us,
+                 timers_set.size(), expired_count, extended_count, 
+                 to_delete.size());
+    }
+}
 
 void Utils::init(int timeslot){
     m_TIMESLOT = timeslot;

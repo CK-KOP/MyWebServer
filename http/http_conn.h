@@ -56,10 +56,11 @@ public:
               int close_log, std::string user, std::string passwd, std::string sqlname);
     void initmysql_result(connection_pool * connPool);
     void close_conn(bool real_close = true);
-    bool read_once();
+    int read_once();
     bool write();
     void process();
     sockaddr_in *get_address(){ return &m_address; }
+    bool is_keep_alive(){ return m_linger;}
 
 public:
     static int m_epollfd;

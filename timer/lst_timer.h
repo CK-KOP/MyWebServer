@@ -48,7 +48,8 @@ public:
 
 struct TimerCmp {
     bool operator()(const util_timer* a, const util_timer* b) const {
-        return a->expire < b->expire;  // 让set按expire从小到大排序
+        if (a->expire != b->expire) return a->expire < b->expire;
+        return a < b;  // 指针地址作为二级排序，保证不同 timer 不会被认为重复
     }
 };
 

@@ -34,7 +34,7 @@ public:
     void trig_mode();
 
     // 关于用户http类数据以及定时器的相关函数
-    void timer(int connfd, struct sockaddr_in client_address);
+    void create_timer(int connfd, struct sockaddr_in client_address);
     void adjust_timer(util_timer *timer);
     void deal_timer(util_timer * timer, int sockfd);
     

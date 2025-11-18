@@ -126,10 +126,10 @@ void WebServer::eventListen(){
     setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
     
     // 将socket绑定到指定地址和端口 
-    // 开始监听连接请求，队列长度为5
+    // 开始监听连接请求，队列长度为65535
     int ret = bind(m_listenfd, (struct sockaddr *)&address, sizeof(address));
     assert(ret >= 0);
-    ret = listen(m_listenfd, 5);
+    ret = listen(m_listenfd, 65535);
     assert(ret >= 0);
     
     // 初始化定时器
@@ -167,7 +167,7 @@ void WebServer::eventListen(){
 }
 
 // 初始化http连接类与定时器，并与当前要连接的客户端绑定
-void WebServer::timer(int connfd, struct sockaddr_in client_address){
+void WebServer::create_timer(int connfd, struct sockaddr_in client_address){
     // http类
     users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
 
@@ -183,6 +183,10 @@ void WebServer::timer(int connfd, struct sockaddr_in client_address){
     timer->expire = cur + 3 * TIMESLOT;
     timer->last_active = cur;
     users_client_data[connfd].timer = timer;
+    // static std::atomic<long> timer_create_count{0};
+    // timer_create_count++;
+    // if (timer_create_count % 10000 == 0)
+    //     LOG_INFO("Created timer for connfd=%d, total created: %ld", connfd, timer_create_count.load());
     Utils::get_instance().m_timer_lst.add_timer(timer);
 }
 
@@ -198,6 +202,10 @@ void WebServer::deal_timer(util_timer *timer, int sockfd){
         LOG_WARN("Trying to delete null timer: fd=%d", sockfd);
         return;
     }
+    // static std::atomic<long> conn_close_count{0};
+    // conn_close_count++;
+    // if (conn_close_count % 10000 == 0)
+    //     LOG_INFO("Closing connfd=%d, total closed: %ld", sockfd, conn_close_count.load());
     timer->cb_func(&users_client_data[sockfd]);
     Utils::get_instance().m_timer_lst.del_timer(timer);
     // 清空指针（防止 double free）
@@ -221,7 +229,7 @@ bool WebServer::dealclientdata(){
             Utils::get_instance().show_error(connfd, "Internal server busy");
             return false;
         }
-        timer(connfd, client_address);
+        create_timer(connfd, client_address);
     }
     else{  // ET模式
         while (1){
@@ -236,7 +244,7 @@ bool WebServer::dealclientdata(){
                 Utils::get_instance().show_error(connfd, "Internal server busy");
                 continue;  // 继续接受其他连接
             }
-            timer(connfd, client_address);
+            create_timer(connfd, client_address);
         }
     }
     return true;
@@ -273,18 +281,23 @@ void WebServer::dealwithread(int sockfd){
     util_timer *timer = users_client_data[sockfd].timer;
     // 日志记录ip地址
     LOG_DEBUG("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-  
-    if (users[sockfd].read_once()) {
+    int flag = users[sockfd].read_once();
+    if (flag > 0) {
 
         // 若监测到读事件，将该事件放入请求队列
         m_pool->append_p(users + sockfd);
 
-        if (timer)
+        if (timer){
             adjust_timer(timer);
+        }
     }
-    else {
-        // 主线程读失败直接标记
+    else if(flag < 0){
         deal_timer(timer, sockfd);
+    }
+    else{
+        if (users[sockfd].is_keep_alive() == 0) {
+            deal_timer(timer, sockfd); // 非长连接，真正关闭连接
+        } 
     }
     
 }
@@ -295,8 +308,9 @@ void WebServer::dealwithwrite(int sockfd){
     LOG_DEBUG("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
     if (users[sockfd].write()) {
 
-        if (timer)
-            adjust_timer(timer);
+        if (timer){
+            adjust_timer(timer);     
+        }
     }
     else {
         deal_timer(timer, sockfd);
@@ -328,11 +342,15 @@ void WebServer::eventLoop(){
                     continue;
             }
             // 处理连接异常或关闭
-            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
+            else if (events[i].events & (EPOLLHUP | EPOLLERR)){
                 //printf("类型为连接异常\n");
                 // 服务器端关闭连接，移除对应的定时器
                 util_timer * timer = users_client_data[sockfd].timer;
                 deal_timer(timer, sockfd);
+            }
+            else if (events[i].events & EPOLLRDHUP) {
+                LOG_DEBUG("EPOLLRDHUP triggered for fd=%d", sockfd);
+                // 不直接删除定时器或关闭连接
             }
             // 处理信号，来自管道的读端 m_pipefd[0] 且是可读事件
             else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN)){

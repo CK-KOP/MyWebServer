@@ -149,7 +149,7 @@ void http_conn::init(){
 // 循环读取客户数据，直到无数据可读或对方关闭连接
 // 非阻塞ET工作模式下，需要一次性将数据读完
 // 从客户端socket读取数据到缓冲区 
-bool http_conn::read_once(){
+int http_conn::read_once(){
     if (m_read_idx >= READ_BUFFER_SIZE)
         return false;
     int bytes_read = 0;
@@ -158,10 +158,12 @@ bool http_conn::read_once(){
     if (0 == m_TRIGMode){
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
         m_read_idx += bytes_read; 
-        if (bytes_read <= 0)
-            return false;
+        if (bytes_read < 0)
+            return -1;
+        else if (bytes_read == 0)
+            return 0;
         //printf("LT读入数据: \n%s\n", m_read_buf);
-        return true;
+        return 1;
     }
     // ET读取数据
     else{
@@ -170,16 +172,15 @@ bool http_conn::read_once(){
             if (bytes_read == -1){
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                     break;
-                return false;
+                return -1;
             }
             else if (bytes_read == 0)
-                return false;
+                return 0;
             m_read_idx += bytes_read;
         }
         //printf("RT读入数据: \n%s\n", m_read_buf);
-        return true;
+        return 1;
     }
-    
 }
 
 // ============ 解析方法 ============
