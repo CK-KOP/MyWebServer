@@ -171,29 +171,31 @@ void WebServer::create_timer(int connfd, struct sockaddr_in client_address){
     // http类
     users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
 
-
     // 虽然是users_client_data，但其实是client_data类，里面包含了用客户端信息以及定时器的指针
     // 创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
     users_client_data[connfd].address = client_address;
     users_client_data[connfd].sockfd = connfd;
+
     util_timer *timer = new util_timer;
     timer->user_data = &users_client_data[connfd];
     timer->cb_func = cb_func;
+
     time_t cur = time(NULL);
-    timer->expire = cur + 3 * TIMESLOT;
+    // 使用随机超时时间（15-25秒之间）
+    int random_timeout = Utils::get_instance().m_timer_wheel.get_random_timeout();
+    timer->expire = cur + random_timeout;
     timer->last_active = cur;
+
     users_client_data[connfd].timer = timer;
-    // static std::atomic<long> timer_create_count{0};
-    // timer_create_count++;
-    // if (timer_create_count % 10000 == 0)
-    //     LOG_INFO("Created timer for connfd=%d, total created: %ld", connfd, timer_create_count.load());
-    Utils::get_instance().m_timer_lst.add_timer(timer);
+
+    Utils::get_instance().m_timer_wheel.add_timer(timer);
 }
 
 // 若有数据传输，不直接修改定时器容器，而是更新该定时器的最新活跃时间
-void WebServer::adjust_timer(util_timer *timer){
+void WebServer::adjust_timer(util_timer* timer) {
     time_t cur = time(NULL);
-    Utils::get_instance().m_timer_lst.adjust_timer(timer, cur);
+    // adjust_timer 内部会自动使用随机超时
+    Utils::get_instance().m_timer_wheel.adjust_timer(timer, cur);
 }
 
 // 关闭超时连接
@@ -202,17 +204,12 @@ void WebServer::deal_timer(util_timer *timer, int sockfd){
         LOG_WARN("Trying to delete null timer: fd=%d", sockfd);
         return;
     }
-    // static std::atomic<long> conn_close_count{0};
-    // conn_close_count++;
-    // if (conn_close_count % 10000 == 0)
-    //     LOG_INFO("Closing connfd=%d, total closed: %ld", sockfd, conn_close_count.load());
     timer->cb_func(&users_client_data[sockfd]);
-    Utils::get_instance().m_timer_lst.del_timer(timer);
+    Utils::get_instance().m_timer_wheel.del_timer(timer);
     // 清空指针（防止 double free）
     users_client_data[sockfd].timer = NULL;
     LOG_DEBUG("close fd %d", users_client_data[sockfd].sockfd);
 }
-
 
 // 处理新客户端连接
 bool WebServer::dealclientdata(){
