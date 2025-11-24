@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
+#include <sys/sendfile.h>
 #include <map>
 
 #include "../mydb/sql_connection_pool.h"
@@ -34,9 +35,16 @@ extern "C" {
 class http_conn{
 public:
     static const int FILENAME_LEN = 200;
-    static const int READ_BUFFER_SIZE = 2048;
-    static const int WRITE_BUFFER_SIZE = 1024;
+    static const int READ_BUFFER_SIZE = 8192;   // 2KB -> 8KB
+    static const int WRITE_BUFFER_SIZE = 4096;  // 1KB -> 4KB
     static const int MAX_HEADERS = 32;  // 最多支持的header数量
+    static const int SENDFILE_THRESHOLD = 32 * 1024; // 32KB
+
+    // sendfile 支持
+    bool m_use_sendfile = false;   // 是否启用 sendfile
+    int m_file_fd = -1;            // 大文件的 fd（小文件不用）
+    off_t m_sf_offset = 0;         // sendfile 偏移量
+    size_t m_sf_remaining = 0;     // 剩余字节
     
     enum METHOD {
         GET = 0, POST, HEAD, PUT, DELETE, TRACE, OPTIONS, CONNECT, PATH
@@ -92,6 +100,9 @@ private:
     bool add_blank_line();
     bool add_content(const char *content);
     bool process_write(HTTP_CODE ret);
+
+    bool write_sendfile();
+    bool write_mmap();
 
 private:
     // 连接信息
