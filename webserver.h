@@ -1,6 +1,7 @@
 #ifndef WEBSERVER_H
 #define WEBSERVER_H
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -38,9 +39,8 @@ public:
     void adjust_timer(util_timer *timer);
     void deal_timer(util_timer * timer, int sockfd);
     
-    // 关于新客户端连接、信号响应、客户端数据读写的处理函数
+    // 关于新客户端连接、客户端数据读写的处理函数
     bool dealclientdata();
-    bool dealwithsignal(bool &timeout, bool &stop_server);
     void dealwithread(int sockfd);
     void dealwithwrite(int sockfd);
 
@@ -55,8 +55,8 @@ public:
     int m_log_write;    // 日志方法 0为同步，1为异步
     int m_close_log;    // 是否关闭日志
 
-    int m_pipefd[2];
     int m_epollfd;
+    int m_timerfd;
     http_conn *users;   // 保存每个客户端的 HTTP 连接对象，每个对象对应一个 socket
 
     // 数据库相关

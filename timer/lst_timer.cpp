@@ -279,14 +279,6 @@ void Utils::addfd(int epollfd, int fd, bool one_shot, int TRIGMode){
     setnonblocking(fd);
 }
 
-// 信号处理函数
-void Utils::sig_handler(int sig){
-    // 为保证函数的可重入性，保留原来的errno
-    int save_errno = errno;
-    int msg = sig;
-    send(u_pipefd[1], (char *)&msg, 1, 0);
-    errno = save_errno;
-}
 
 // 设置信号函数
 void Utils::addsig(int sig, void(handle)(int), bool restart){
@@ -304,7 +296,6 @@ void Utils::addsig(int sig, void(handle)(int), bool restart){
 // 定时处理任务，重新定时以不断触发SIGALRM信号
 void Utils::timer_handler(){
     m_timer_wheel.tick();
-    alarm(m_TIMESLOT);
 }
 
 void Utils::show_error(int connfd, const char *info){
@@ -312,7 +303,6 @@ void Utils::show_error(int connfd, const char *info){
     close(connfd);
 } 
 
-int *Utils::u_pipefd = 0;
 int Utils::u_epollfd = 0;
 
 class Utils;

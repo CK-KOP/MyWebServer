@@ -20,8 +20,7 @@ WebServer::WebServer(){
 WebServer::~WebServer(){
     close(m_epollfd);
     close(m_listenfd);
-    close(m_pipefd[1]);
-    close(m_pipefd[0]);
+    close(m_timerfd);
     delete[] users;
     delete[] users_client_data;
     delete m_pool;
@@ -132,7 +131,7 @@ void WebServer::eventListen(){
     ret = listen(m_listenfd, 65535);
     assert(ret >= 0);
     
-    // 初始化定时器
+    // 初始化定时器（时间轮）
     Utils::get_instance().init(TIMESLOT);
 
     // epoll创建内核事件表
@@ -144,25 +143,22 @@ void WebServer::eventListen(){
     Utils::get_instance().addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
     http_conn::m_epollfd = m_epollfd;
     
-    // 创建双向通信管道，用于信号处理
-    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_pipefd);
-    assert(ret != -1);
+    // 创建 timerfd 替代 SIGALRM
+    m_timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    assert(m_timerfd > 0);
 
-    // 设置写端非阻塞，将读端添加到epoll监控
-    Utils::get_instance().setnonblocking(m_pipefd[1]);
-    Utils::get_instance().addfd(m_epollfd, m_pipefd[0], false, 0);
+    // 设置周期定时器（等价原 TIMESLOT 秒触发一次）
+    itimerspec new_value{};
+    new_value.it_value.tv_sec = TIMESLOT;      // 第一次触发时间
+    new_value.it_interval.tv_sec = TIMESLOT;   // 周期
+    timerfd_settime(m_timerfd, 0, &new_value, nullptr);
 
-    // 信号处理设置
+    // 将 timerfd 添加到 epoll
+    Utils::get_instance().addfd(m_epollfd, m_timerfd, false, 0);
+
     // 忽略SIGPIPE信号，防止在写入已关闭的socket时服务器崩溃
-    // 设置SIGALRM(定时器)和SIGTERM(终止)的处理函数
-    // 启动定时器，每TIMESLOT秒产生一个SIGALRM信号
     Utils::get_instance().addsig(SIGPIPE, SIG_IGN);
-    Utils::get_instance().addsig(SIGALRM, Utils::get_instance().sig_handler, false);
-    Utils::get_instance().addsig(SIGTERM, Utils::get_instance().sig_handler, false);
-    alarm(TIMESLOT); // 用信号来保证定时检查定时器的情况
 
-    // 工具类,信号和描述符基础操作
-    Utils::u_pipefd = m_pipefd;
     Utils::u_epollfd = m_epollfd;
 }
 
@@ -220,6 +216,7 @@ bool WebServer::dealclientdata(){
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlenth);
         if (connfd < 0){
             LOG_ERROR("LT accept error: %d", errno);
+            LOG_ERROR("accept error: errno=%d (%s)", errno, strerror(errno));
             return false;
         }
         if (http_conn::m_user_count >= MAX_FD){
@@ -235,6 +232,7 @@ bool WebServer::dealclientdata(){
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                     break;  // accept已经读取不到连接了，正常结束
                 LOG_ERROR("ET accept error: %d", errno);
+                LOG_ERROR("accept error: errno=%d (%s)", errno, strerror(errno));
                 return false;
             }
             if (http_conn::m_user_count >= MAX_FD){
@@ -247,32 +245,6 @@ bool WebServer::dealclientdata(){
     return true;
 }
 
-// 处理信号请求
-bool WebServer::dealwithsignal(bool &timeout, bool &stop_server){
-    int ret = 0;
-    int sig;
-    char signals[1024];
-    ret = recv(m_pipefd[0], signals, sizeof(signals), 0);
-    if (ret == -1)
-        return false;
-    else if (ret == 0)
-        return false;
-    else{
-        for (int i = 0;i < ret;i++){
-            switch (signals[i]){
-            case SIGALRM:{
-                timeout = true;
-                break;
-            }
-            case SIGTERM:{
-                stop_server = true;
-                break;
-            }
-            }
-        }
-    }
-    return true;
-}
 
 void WebServer::dealwithread(int sockfd){
     util_timer *timer = users_client_data[sockfd].timer;
@@ -319,6 +291,7 @@ void WebServer::eventLoop(){
     bool timeout = false;
     bool stop_server = false;
 
+    // 留着stop_server，后续可以优雅关闭
     while (!stop_server){
         int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
         // 出错且不是信号中断引起的
@@ -330,17 +303,14 @@ void WebServer::eventLoop(){
         for (int i = 0;i < number;i++){
             int sockfd = events[i].data.fd;
             
-            //printf("触发epoll_wait的sockfd: %d\n", sockfd);
             // 处理新客户连接
             if (sockfd ==m_listenfd){
-                //printf("类型为新客户端连接\n");
                 bool flag = dealclientdata();
                 if (!flag)
                     continue;
             }
             // 处理连接异常或关闭
             else if (events[i].events & (EPOLLHUP | EPOLLERR)){
-                //printf("类型为连接异常\n");
                 // 服务器端关闭连接，移除对应的定时器
                 util_timer * timer = users_client_data[sockfd].timer;
                 deal_timer(timer, sockfd);
@@ -349,21 +319,18 @@ void WebServer::eventLoop(){
                 LOG_DEBUG("EPOLLRDHUP triggered for fd=%d", sockfd);
                 // 不直接删除定时器或关闭连接
             }
-            // 处理信号，来自管道的读端 m_pipefd[0] 且是可读事件
-            else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN)){
-                //printf("类型为信号处理\n");
-                bool flag = dealwithsignal(timeout, stop_server);
-                if (!flag)
-                    LOG_ERROR("%s", "dealclientdata failure");
+            // 定时事件
+            else if (sockfd == m_timerfd && (events[i].events & EPOLLIN)) {
+                uint64_t exp;
+                read(m_timerfd, &exp, sizeof(exp));  // 清空计数，避免重复触发
+                timeout = true;   // 保持原来的模型
             }
             // 处理客户数据读取
             else if (events[i].events & EPOLLIN){
-                //printf("类型为客户端数据读取\n");
                 dealwithread(sockfd);
             }
             // 处理客户数据发送
             else if (events[i].events & EPOLLOUT){
-                //printf("类型为客户端数据发送\n");
                 dealwithwrite(sockfd);
             }
         }
