@@ -86,7 +86,7 @@ void WebServer::sql_pool(){
     m_connPool->init("localhost", m_user, m_passWord, m_databaseName, 3306, m_sql_num, m_close_log);
 
     // 初始化数据库读取表map
-    users->initmysql_result(m_connPool);
+    users->init_mysql_result(m_connPool);
 }
 
 void WebServer::thread_pool(){
