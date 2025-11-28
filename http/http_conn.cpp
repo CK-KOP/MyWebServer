@@ -2,6 +2,7 @@
 #include "http_conn.h"
 #include <mysql/mysql.h>
 #include <fstream>
+#include "../utils/utils.h"
 
 // ========== HTTP响应状态信息 ==========
 const char *ok_200_title = "OK";
@@ -18,60 +19,22 @@ const char *error_500_form = "There was an unusual problem serving the request f
 std::mutex m_mutex;
 std::map<std::string, std::string> users;
 
-// ========== 静态成员初始化 ==========
-int http_conn::m_user_count = 0;
-int http_conn::m_epollfd = -1;
 
 // ========== 工具函数（无需修改，仅更新变量名引用）==========
 
-// 设置文件描述符为非阻塞
-int setnonblocking(int fd) {
-    int old_option = fcntl(fd, F_GETFL);
-    int new_option = old_option | O_NONBLOCK;
-    fcntl(fd, F_SETFL, new_option);
-    return old_option;
-}
+// 设置文件描述符为非阻塞 - 已移至Utils::setnonblocking
 
-// 将文件描述符添加到epoll
-void addfd(int epollfd, int fd, bool one_shot, int trigger_mode) {
-    epoll_event event;
-    event.data.fd = fd;
+// 工具函数addfd已移至Utils::addfd
 
-    if (trigger_mode == 1)
-        event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-    else
-        event.events = EPOLLIN | EPOLLRDHUP;
+// 工具函数removefd已移至Utils::removefd
 
-    if (one_shot)
-        event.events |= EPOLLONESHOT;
-    
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
-    setnonblocking(fd);
-}
-
-// 从epoll中删除文件描述符
-void removefd(int epollfd, int fd) {
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0);
-    close(fd);
-}
-
-// 修改epoll中的文件描述符
-void modfd(int epollfd, int fd, int ev, int trigger_mode) {
-    epoll_event event;
-    event.data.fd = fd;
-
-    if (trigger_mode == 1)
-        event.events = ev | EPOLLET | EPOLLONESHOT | EPOLLRDHUP;
-    else
-        event.events = ev | EPOLLONESHOT | EPOLLRDHUP;
-
-    epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
-}
+// 工具函数modfd已移至Utils::modfd
 
 // ========== 初始化函数 ==========
 
 // 从数据库加载用户信息
-void http_conn::init_mysql_result(connection_pool *connPool) {
+// 从数据库加载用户信息（静态方法）
+void http_conn::init_database_users(connection_pool *connPool) {
     // 从连接池获取一个连接
     ConnectionGuard connGuard(*connPool);
     MYSQL* mysql = connGuard.get();
@@ -84,7 +47,7 @@ void http_conn::init_mysql_result(connection_pool *connPool) {
 
     // 获取结果集
     MYSQL_RES *result = mysql_store_result(mysql);
-    
+
     // 将用户名和密码存入map
     while (MYSQL_ROW row = mysql_fetch_row(result)) {
         std::string username(row[0]);
@@ -95,14 +58,16 @@ void http_conn::init_mysql_result(connection_pool *connPool) {
 
 // 外部调用的初始化函数
 void http_conn::init(int sockfd, const sockaddr_in &addr, char *root, int trigger_mode,
-                     int close_log, std::string user, std::string passwd, std::string sqlname) {
+                     int close_log, std::string user, std::string passwd, std::string sqlname,
+                     int epollfd) {
     m_sockfd = sockfd;
     m_address = addr;
-    
+    m_epollfd = epollfd;  // 设置成员变量
+
     // 将socket添加到epoll
-    addfd(m_epollfd, sockfd, true, trigger_mode);
-    m_user_count++;
-    
+    Utils::addfd(m_epollfd, sockfd, true, trigger_mode);
+    // m_user_count++;  // 移除，改为外部管理
+
     // 保存配置
     m_doc_root = root;
     m_trigger_mode = trigger_mode;
@@ -126,6 +91,9 @@ void http_conn::init() {
     m_host = m_host_buf;
     m_content_length = 0;
     m_keep_alive = false;
+
+    // 重置连接状态
+    m_peer_closed = false;
     
     // 重置POST相关
     m_is_post_form = false;
@@ -152,14 +120,7 @@ void http_conn::init() {
     memset(m_host_buf, '\0', 256);
 }
 
-// 关闭连接
-void http_conn::close_conn(bool real_close) {
-    if (real_close && (m_sockfd != -1)) {
-        removefd(m_epollfd, m_sockfd);
-        m_sockfd = -1;
-        m_user_count--;
-    }
-}
+// close_conn方法已移除，连接管理由WebServer负责
 
 // 解除内存映射或关闭文件描述符
 void http_conn::unmap() {
@@ -179,7 +140,7 @@ void http_conn::unmap() {
 // 从socket读取数据到缓冲区
 int http_conn::read_once() {
     if (m_read_idx >= READ_BUFFER_SIZE)
-        return false;
+        return -1;
     
     int bytes_read = 0;
 
@@ -187,12 +148,13 @@ int http_conn::read_once() {
     if (m_trigger_mode == 0) {
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, 
                          READ_BUFFER_SIZE - m_read_idx, 0);
-        m_read_idx += bytes_read;
         
         if (bytes_read < 0)
             return -1;
         else if (bytes_read == 0)
             return 0;
+        
+        m_read_idx += bytes_read;
         
         return 1;
     }
@@ -660,32 +622,31 @@ bool http_conn::process_write(HTTP_CODE ret) {
 }
 
 // 主处理函数
-void http_conn::process() {
+http_conn::PROCESS_RESULT http_conn::process() {
     // 解析HTTP请求
     HTTP_CODE read_ret = process_read();
-    
+
     if (read_ret == NO_REQUEST) {
-        // 请求不完整，继续监听读事件
-        modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
-        return;
+        // 请求不完整，需要继续读取
+        return PROCESS_CONTINUE;
     }
-    
+
     // 构建HTTP响应
     bool write_ret = process_write(read_ret);
     if (!write_ret) {
-        close_conn();
-        return;
+        // 构建响应失败，需要关闭连接
+        return PROCESS_ERROR;
     }
-    
-    // 注册写事件
-    modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
+
+    // 处理成功，等待写事件
+    return PROCESS_OK;
 }
 
 
 // ========== 数据发送 ==========
 
 // 主写入函数
-bool http_conn::write() {
+int http_conn::write() {
     if (m_use_sendfile) {
         return write_with_sendfile();
     }
@@ -693,14 +654,14 @@ bool http_conn::write() {
 }
 
 // 使用mmap方式发送数据
-bool http_conn::write_with_mmap() {
+int http_conn::write_with_mmap() {
     int tmp = 0;
     
     // 没有数据需要发送
     if (m_bytes_to_send == 0) {
-        modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
+        Utils::modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
         init();
-        return true;
+        return 1;  // 写完成
     }
     
     while (true) {
@@ -708,13 +669,17 @@ bool http_conn::write_with_mmap() {
         tmp = writev(m_sockfd, m_response_iov, m_response_iov_count);
 
         if (tmp < 0) {
-            // 发送缓冲区已满
+            // 发送缓冲区已满，需要继续写
             if (errno == EAGAIN) {
-                modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
-                return true;
+                Utils::modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
+                return 0;  // 需要继续写
+            }
+            // 连接错误：对端关闭连接或网络错误
+            if (errno == ECONNRESET || errno == EPIPE || errno == EBADF) {
+                LOG_DEBUG("Connection error during write: errno=%d, fd=%d", errno, m_sockfd);
             }
             unmap();
-            return false;
+            return -1;  // 写错误
         }
 
         m_bytes_have_send += tmp;
@@ -735,32 +700,35 @@ bool http_conn::write_with_mmap() {
         // 所有数据已发送完毕
         if (m_bytes_to_send <= 0) {
             unmap();
-            modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
 
-            // 保持连接
-            if (m_keep_alive) {
+            // 长连接且对端未关闭，继续监听读事件
+            if (m_keep_alive && !m_peer_closed) {
+                Utils::modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
                 init();
-                return true;
             }
-            // 关闭连接
-            else {
-                return false;
-            }
+            // 短连接或对端已关闭，由外层处理关闭
+            // (不需要注册读事件，直接返回1表示写完成)
+
+            return 1;  // 写完成
         }
     }
 }
 
 // 使用sendfile方式发送数据
-bool http_conn::write_with_sendfile() {
+int http_conn::write_with_sendfile() {
     // 步骤1: 先发送响应头
     while (m_response_iov[0].iov_len > 0) {
         ssize_t ret = writev(m_sockfd, m_response_iov, 1);
         if (ret < 0) {
             if (errno == EAGAIN) {
-                modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
-                return true;
+                Utils::modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
+                return 0;  // 需要继续写
             }
-            return false;
+            // 连接错误：对端关闭连接或网络错误
+            if (errno == ECONNRESET || errno == EPIPE || errno == EBADF) {
+                LOG_DEBUG("Connection error during writev: errno=%d, fd=%d", errno, m_sockfd);
+            }
+            return -1;  // 写错误
         }
         m_bytes_have_send += ret;
         m_response_iov[0].iov_len -= ret;
@@ -772,29 +740,33 @@ bool http_conn::write_with_sendfile() {
         ssize_t ret = sendfile(m_sockfd, m_file_fd, &m_sendfile_offset, m_sendfile_remaining);
         if (ret < 0) {
             if (errno == EAGAIN) {
-                modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
-                return true;
+                Utils::modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
+                return 0;  // 需要继续写
             }
-            return false;
+            // 连接错误：对端关闭连接或网络错误
+            if (errno == ECONNRESET || errno == EPIPE || errno == EBADF) {
+                LOG_DEBUG("Connection error during sendfile: errno=%d, fd=%d", errno, m_sockfd);
+            }
+            return -1;  // 写错误
         }
         m_sendfile_remaining -= ret;
     }
 
     // 步骤3: 如果文件内容未完全发送，继续等待可写事件
     if (m_sendfile_remaining > 0) {
-        modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
-        return true;
+        Utils::modfd(m_epollfd, m_sockfd, EPOLLOUT, m_trigger_mode);
+        return 0;  // 需要继续写
     }
 
     // 步骤4: 所有数据发送完毕
     unmap();
-    modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
 
-    // 保持连接
-    if (m_keep_alive) {
+    // 长连接且对端未关闭，继续监听读事件
+    if (m_keep_alive && !m_peer_closed) {
+        Utils::modfd(m_epollfd, m_sockfd, EPOLLIN, m_trigger_mode);
         init();
-        return true;
     }
-    // 关闭连接
-    return false;
+    // 短连接或对端已关闭，由外层处理关闭
+
+    return 1;  // 写完成
 }

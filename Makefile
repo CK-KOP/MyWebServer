@@ -12,8 +12,8 @@ endif
 CXXFLAG += -I./third_party
 
 
-server: main.cpp webserver.cpp config.cpp ./mydb/sql_connection_pool.cpp ./http/http_conn.cpp ./log/log.cpp ./timer/lst_timer.cpp ./third_party/picohttpparser/picohttpparser.c
-	$(CXX) -o server $^ $(CXXFLAG) -lpthread -lmysqlclient
+server: main.cpp webserver.cpp config.cpp ./mydb/sql_connection_pool.cpp ./http/http_conn.cpp ./log/log.cpp ./timer/lst_timer.cpp ./utils/utils.cpp ./third_party/picohttpparser/picohttpparser.c
+	$(CXX) -o server $^ $(CXXFLAG) -lpthread -lmysqlclient -std=c++14
 
 .PHONY : clean
 clean:

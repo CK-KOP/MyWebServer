@@ -14,18 +14,15 @@ int main(int argc, char *argv[]){
     WebServer server;
 
     // 初始化
-    server.init(config.PORT, user, passwd, databasename, config.LOGWrite, 
-                config.OPT_LINGER, config.TRIGMode,  config.sql_num,  config.thread_num, 
+    server.init(config.PORT, user, passwd, databasename, config.LOGWrite,
+                config.OPT_LINGER, config.TRIGMode,  config.sql_num,
                 config.close_log);
-    
+
     //日志
     server.log_write();
 
     //数据库
     server.sql_pool();
-
-    //线程池
-    server.thread_pool();
 
     //触发模式
     server.trig_mode();

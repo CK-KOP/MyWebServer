@@ -67,32 +67,47 @@ public:
         ROUTE_FANS = '7'            // 粉丝页面
     };
 
+    // process处理结果状态
+    enum PROCESS_RESULT {
+        PROCESS_OK = 0,         // 处理成功，等待写事件
+        PROCESS_ERROR = -1,      // 处理失败，需要关闭连接
+        PROCESS_CONTINUE = 1     // 请求不完整，需要继续读取
+    };
+
 public:
     http_conn() {}
     ~http_conn() {}
 
     // ========== 公共接口 ==========
-    void init(int sockfd, const sockaddr_in &addr, char *root, int TRIGMode, 
-              int close_log, std::string user, std::string passwd, std::string sqlname);
-    void init_mysql_result(connection_pool *connPool);
-    void close_conn(bool real_close = true);
+    void init(int sockfd, const sockaddr_in &addr, char *root, int TRIGMode,
+              int close_log, std::string user, std::string passwd, std::string sqlname,
+              int epollfd);
     
     int read_once();
-    bool write();
-    void process();
+    int write();  // 1: 写完成, 0: 需要继续写, -1: 写错误
+    PROCESS_RESULT process();
     
     sockaddr_in *get_address() { return &m_address; }
     bool is_keep_alive() { return m_keep_alive; }
 
-    // ========== 静态成员 ==========
-    static int m_epollfd;
-    static int m_user_count;
+    // ========== epollfd改为成员变量 ==========
+    int m_epollfd;
+
+    // ========== 静态方法 ==========
+    // 初始化数据库用户数据表（静态方法）
+    static void init_database_users(connection_pool *connPool);
+
+    // 连接计数管理（可以外部维护）
+    // static int m_user_count;  // 移除，改为外部管理
 
     // ========== 数据库连接 ==========
     MYSQL *mysql;
     
     // ========== 读写状态 ==========
     int m_state;  // 0: 读, 1: 写
+
+    // ========== 连接状态 ==========
+    bool m_peer_closed;  // 对端是否已经关闭
 
 private:
     // ========== 初始化 ==========
@@ -122,8 +137,8 @@ private:
     bool add_content(const char *content);
     
     // ========== 数据发送 ==========
-    bool write_with_mmap();
-    bool write_with_sendfile();
+    int write_with_mmap();
+    int write_with_sendfile();
     
     // ========== 文件处理 ==========
     void unmap();
@@ -181,8 +196,6 @@ private:
     int m_trigger_mode;    // 改名: m_TRIGMode -> m_trigger_mode
     int m_close_log;
     
-    // ========== 用户数据缓存 ==========
-    std::map<std::string, std::string> m_users;
 };
 
 #endif

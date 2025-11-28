@@ -24,6 +24,7 @@
 #include <random>
 #include <vector>
 #include <set>
+#include <functional>
 #include "../log/log.h"
 
 class util_timer;
@@ -42,7 +43,9 @@ public:
 public:
     time_t expire;
     time_t last_active; // 最近活跃时间
-    void (* cb_func)(client_data *);
+
+    // 使用std::function支持完整的回调逻辑
+    std::function<void()> cb_func;
     client_data *user_data;    // 以便定时器需要销毁的时候顺便清理该连接
 
     // 时间轮专用字段
@@ -131,44 +134,10 @@ private:
 };
 
 
-class Utils{
-public:
-    static Utils& get_instance() {
-        static Utils instance;
-        return instance;
-    }
 
-    // 禁止拷贝与赋值
-    Utils(const Utils&) = delete;
-    Utils& operator=(const Utils&) = delete;
+void cb_func(client_data *user_data, int epollfd);
+void cb_func(client_data *user_data);  // 兼容旧接口的版本
 
-    
-    void init(int timeslot);
-    
-    // 对文件描述符设置非阻塞
-    int setnonblocking(int fd);
-
-    // 将内核事件表注册读事件，ET模式，选择开启EPOLLONESHOT
-    void addfd(int epollfd, int fd, bool one_shot, int TRIGMode);
-    
-    // 设置信号函数
-    void addsig(int sig, void(handler)(int), bool restart = true);
-
-    // 定时处理任务，重新定时以不断触发SIGALRM信号
-    void timer_handler();
-    
-    void show_error(int connfd, const char *info);
-
-public:
-    static int u_epollfd;
-    int m_TIMESLOT;  // 由 Weberver类初始化
-
-    // 修改：替换为新的时间轮
-    TimingWheel m_timer_wheel;  // 替代原来的 sort_timer_lst m_timer_lst;
-private:
-    Utils() {}  // 构造函数私有化
-    ~Utils() {}
-};
-
-void cb_func(client_data *user_data);
+// 全局变量，临时方案
+extern int g_epollfd;
 #endif

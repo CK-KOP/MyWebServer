@@ -1,10 +1,6 @@
 #include "webserver.h"
 
 WebServer::WebServer(){
-    
-    // http_conn类对象，每个元素对应一个客户端连接
-    users = new http_conn[MAX_FD];
-    
     // root文件夹路径，资源目录
     char server_path[200];
     getcwd(server_path, 200);
@@ -12,23 +8,18 @@ WebServer::WebServer(){
     m_root = (char *)malloc(strlen(server_path) + strlen(root) + 1);
     strcpy(m_root, server_path);
     strcat(m_root, root);
-
-    // 包含了该客户端对象的地址、标志符、对应的定时器指针
-    users_client_data = new client_data[MAX_FD];
 }
 
 WebServer::~WebServer(){
     close(m_epollfd);
     close(m_listenfd);
     close(m_timerfd);
-    delete[] users;
-    delete[] users_client_data;
-    delete m_pool;
+    // unique_ptr会自动清理m_users和m_clients中的对象
 }
 
-void WebServer::init(int port , string user, string passWord, string databaseName,
+void WebServer::init(int port , std::string user, std::string passWord, std::string databaseName,
               int log_write , int opt_linger, int trigmode, int sql_num,
-              int thread_num, int close_log){
+              int close_log){
 
     m_port = port;
     m_user = user;
@@ -38,7 +29,6 @@ void WebServer::init(int port , string user, string passWord, string databaseNam
     m_OPT_LINGER = opt_linger;
     m_TRIGMode = trigmode;
     m_sql_num = sql_num;
-    m_thread_num = thread_num;
     m_close_log = close_log;
 }
 
@@ -85,14 +75,10 @@ void WebServer::sql_pool(){
     m_connPool = connection_pool::GetInstance();
     m_connPool->init("localhost", m_user, m_passWord, m_databaseName, 3306, m_sql_num, m_close_log);
 
-    // 初始化数据库读取表map
-    users->init_mysql_result(m_connPool);
+    // 使用静态方法初始化数据库用户数据
+    http_conn::init_database_users(m_connPool);
 }
 
-void WebServer::thread_pool(){
-    // 线程池
-    m_pool = new threadpool<http_conn>(m_connPool, m_thread_num);
-}
 
 // 服务器启动
 void WebServer::eventListen(){
@@ -132,7 +118,7 @@ void WebServer::eventListen(){
     assert(ret >= 0);
     
     // 初始化定时器（时间轮）
-    Utils::get_instance().init(TIMESLOT);
+    m_timer_wheel.set_timeslot(TIMESLOT);
 
     // epoll创建内核事件表
     epoll_event events[MAX_EVENT_NUMBER];  //好像完全没有用到
@@ -140,8 +126,8 @@ void WebServer::eventListen(){
     assert(m_epollfd != -1);
 
     // 监听套接字添加到epoll
-    Utils::get_instance().addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
-    http_conn::m_epollfd = m_epollfd;
+    Utils::addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
+    // http_conn::m_epollfd = m_epollfd;  // 移除，改为成员变量
     
     // 创建 timerfd 替代 SIGALRM
     m_timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -154,57 +140,113 @@ void WebServer::eventListen(){
     timerfd_settime(m_timerfd, 0, &new_value, nullptr);
 
     // 将 timerfd 添加到 epoll
-    Utils::get_instance().addfd(m_epollfd, m_timerfd, false, 0);
+    Utils::addfd(m_epollfd, m_timerfd, false, 0);
 
     // 忽略SIGPIPE信号，防止在写入已关闭的socket时服务器崩溃
-    Utils::get_instance().addsig(SIGPIPE, SIG_IGN);
-
-    Utils::u_epollfd = m_epollfd;
+    Utils::addsig(SIGPIPE, SIG_IGN);
 }
 
 // 初始化http连接类与定时器，并与当前要连接的客户端绑定
 void WebServer::create_timer(int connfd, struct sockaddr_in client_address){
-    // http类
-    users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
+    // 创建http连接对象
+    auto http_conn_ptr = std::make_unique<http_conn>();
+    http_conn_ptr->init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName, m_epollfd);
 
-    // 虽然是users_client_data，但其实是client_data类，里面包含了用客户端信息以及定时器的指针
-    // 创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
-    users_client_data[connfd].address = client_address;
-    users_client_data[connfd].sockfd = connfd;
+    // 增加连接计数
+    m_user_count++;
 
+    // 创建client_data对象
+    auto client_data_ptr = std::make_unique<client_data>();
+    client_data_ptr->address = client_address;
+    client_data_ptr->sockfd = connfd;
+
+    // 创建定时器
     util_timer *timer = new util_timer;
-    timer->user_data = &users_client_data[connfd];
-    timer->cb_func = cb_func;
+    timer->user_data = client_data_ptr.get();  // 使用裸指针，但不拥有所有权
+
+    // 使用lambda创建回调函数，可以捕获WebServer的this指针
+    timer->cb_func = [this, connfd]() {
+        this->close_connection_by_timer(connfd);
+    };
 
     time_t cur = time(NULL);
     // 使用随机超时时间（15-25秒之间）
-    int random_timeout = Utils::get_instance().m_timer_wheel.get_random_timeout();
+    int random_timeout = m_timer_wheel.get_random_timeout();
     timer->expire = cur + random_timeout;
     timer->last_active = cur;
 
-    users_client_data[connfd].timer = timer;
+    client_data_ptr->timer = timer;
+    m_timer_wheel.add_timer(timer);
 
-    Utils::get_instance().m_timer_wheel.add_timer(timer);
+    // 将对象添加到map中
+    m_users[connfd] = std::move(http_conn_ptr);
+    m_clients[connfd] = std::move(client_data_ptr);
 }
 
 // 若有数据传输，不直接修改定时器容器，而是更新该定时器的最新活跃时间
 void WebServer::adjust_timer(util_timer* timer) {
     time_t cur = time(NULL);
     // adjust_timer 内部会自动使用随机超时
-    Utils::get_instance().m_timer_wheel.adjust_timer(timer, cur);
+    m_timer_wheel.adjust_timer(timer, cur);
 }
 
-// 关闭超时连接
-void WebServer::deal_timer(util_timer *timer, int sockfd){
+// 关闭连接（包含定时器超时、错误等情况）
+void WebServer::close_connection(util_timer *timer, int sockfd){
     if (!timer) {
         LOG_WARN("Trying to delete null timer: fd=%d", sockfd);
         return;
     }
-    timer->cb_func(&users_client_data[sockfd]);
-    Utils::get_instance().m_timer_wheel.del_timer(timer);
-    // 清空指针（防止 double free）
-    users_client_data[sockfd].timer = NULL;
-    LOG_DEBUG("close fd %d", users_client_data[sockfd].sockfd);
+
+    // 从epoll中删除文件描述符
+    epoll_ctl(m_epollfd, EPOLL_CTL_DEL, sockfd, 0);
+
+    // 关闭套接字
+    close(sockfd);
+
+    // 从时间轮中删除定时器
+    m_timer_wheel.del_timer(timer);
+
+    // 从map中移除，自动删除对象
+    auto client_it = m_clients.find(sockfd);
+    if (client_it != m_clients.end()) {
+        m_clients.erase(client_it);  // 自动删除client_data对象
+    }
+
+    // 从http连接map中移除
+    auto user_it = m_users.find(sockfd);
+    if (user_it != m_users.end()) {
+        m_users.erase(user_it);  // 自动删除http_conn对象
+    }
+
+    // 减少连接计数
+    m_user_count--;
+
+    LOG_DEBUG("close fd %d", sockfd);
+}
+
+// 定时器回调调用版本，只负责资源清理，不删除定时器（定时器由时间轮自己删除）
+void WebServer::close_connection_by_timer(int sockfd) {
+    // 从epoll中删除文件描述符
+    epoll_ctl(m_epollfd, EPOLL_CTL_DEL, sockfd, 0);
+    // 关闭套接字
+    close(sockfd);
+
+    // 从map中移除，自动删除对象
+    auto client_it = m_clients.find(sockfd);
+    if (client_it != m_clients.end()) {
+        m_clients.erase(client_it);  // 自动删除client_data对象
+    }
+
+    // 从http连接map中移除
+    auto user_it = m_users.find(sockfd);
+    if (user_it != m_users.end()) {
+        m_users.erase(user_it);  // 自动删除http_conn对象
+    }
+
+    // 减少连接计数
+    m_user_count--;
+
+    LOG_DEBUG("Timer callback closed fd %d", sockfd);
 }
 
 // 处理新客户端连接
@@ -219,8 +261,8 @@ bool WebServer::dealclientdata(){
             LOG_ERROR("accept error: errno=%d (%s)", errno, strerror(errno));
             return false;
         }
-        if (http_conn::m_user_count >= MAX_FD){
-            Utils::get_instance().show_error(connfd, "Internal server busy");
+        if (m_user_count >= MAX_FD){
+            Utils::show_error(connfd, "Internal server busy");
             return false;
         }
         create_timer(connfd, client_address);
@@ -235,8 +277,8 @@ bool WebServer::dealclientdata(){
                 LOG_ERROR("accept error: errno=%d (%s)", errno, strerror(errno));
                 return false;
             }
-            if (http_conn::m_user_count >= MAX_FD){
-                Utils::get_instance().show_error(connfd, "Internal server busy");
+            if (m_user_count >= MAX_FD){
+                Utils::show_error(connfd, "Internal server busy");
                 continue;  // 继续接受其他连接
             }
             create_timer(connfd, client_address);
@@ -247,44 +289,129 @@ bool WebServer::dealclientdata(){
 
 
 void WebServer::dealwithread(int sockfd){
-    util_timer *timer = users_client_data[sockfd].timer;
-    // 日志记录ip地址
-    LOG_DEBUG("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-    int flag = users[sockfd].read_once();
-    if (flag > 0) {
+    auto client_it = m_clients.find(sockfd);
+    auto user_it = m_users.find(sockfd);
 
-        // 若监测到读事件，将该事件放入请求队列
-        m_pool->append_p(users + sockfd);
+    if (client_it == m_clients.end() || user_it == m_users.end()) {
+        LOG_WARN("Connection %d not found in maps", sockfd);
+        return;
+    }
+
+    util_timer *timer = client_it->second->timer;
+
+    // 日志记录ip地址
+    LOG_DEBUG("deal with the client(%s)", inet_ntoa(user_it->second->get_address()->sin_addr));
+
+    int flag = user_it->second->read_once();
+    if (flag > 0) {
+        // 成功读取到数据
+        ConnectionGuard connGuard(*m_connPool);
+        user_it->second->mysql = connGuard.get();
+        http_conn::PROCESS_RESULT result = user_it->second->process();
+
+        // 根据process返回值处理
+        if (result == http_conn::PROCESS_ERROR) {
+            // 处理失败，关闭连接
+            close_connection(timer, sockfd);
+            return;
+        }
+        else if (result == http_conn::PROCESS_CONTINUE) {
+            // 请求不完整，继续监听读事件
+            Utils::modfd(m_epollfd, sockfd, EPOLLIN, m_CONNTrigmode);
+        }
+        else if (result == http_conn::PROCESS_OK) {
+            // 处理成功，注册写事件
+            Utils::modfd(m_epollfd, sockfd, EPOLLOUT, m_CONNTrigmode);
+        }
 
         if (timer){
             adjust_timer(timer);
         }
     }
     else if(flag < 0){
-        deal_timer(timer, sockfd);
+        // 读取错误，关闭连接
+        close_connection(timer, sockfd);
     }
     else{
-        if (users[sockfd].is_keep_alive() == 0) {
-            deal_timer(timer, sockfd); // 非长连接，真正关闭连接
-        } 
+        // flag == 0，对端关闭了连接(FIN)
+        // 但是我们可能还需要发送响应数据，先处理已读取的数据
+        ConnectionGuard connGuard(*m_connPool);
+        user_it->second->mysql = connGuard.get();
+        http_conn::PROCESS_RESULT result = user_it->second->process();
+
+        if (result == http_conn::PROCESS_ERROR) {
+            // 处理失败，关闭连接
+            close_connection(timer, sockfd);
+            return;
+        }
+        else if (result == http_conn::PROCESS_CONTINUE) {
+            // 请求不完整但连接已关闭，直接关闭连接
+            LOG_DEBUG("Incomplete request but client closed: fd=%d", sockfd);
+            close_connection(timer, sockfd);
+        }
+        else if (result == http_conn::PROCESS_OK) {
+            // 处理成功，发送响应后关闭连接
+            LOG_DEBUG("Client closed, sending final response: fd=%d", sockfd);
+            user_it->second->m_peer_closed = true;  // 标记对端已关闭
+            Utils::modfd(m_epollfd, sockfd, EPOLLOUT, m_CONNTrigmode);
+
+            if (timer){
+                adjust_timer(timer);
+            }
+        }
     }
-    
 }
 
 void WebServer::dealwithwrite(int sockfd){
-    util_timer *timer = users_client_data[sockfd].timer;
+    auto client_it = m_clients.find(sockfd);
+    auto user_it = m_users.find(sockfd);
 
-    LOG_DEBUG("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-    if (users[sockfd].write()) {
+    if (client_it == m_clients.end() || user_it == m_users.end()) {
+        LOG_WARN("Connection %d not found in maps", sockfd);
+        return;
+    }
 
+    util_timer *timer = client_it->second->timer;
+
+    LOG_DEBUG("send data to the client(%s)", inet_ntoa(user_it->second->get_address()->sin_addr));
+    int write_result = user_it->second->write();
+
+    if (write_result == 1) {
+        // 写入完成，检查是否需要关闭连接
+        bool should_close = false;
+
+        if (user_it->second->m_peer_closed) {
+            // 对端已关闭，必须关闭连接
+            LOG_DEBUG("Peer closed, final response sent: fd=%d", sockfd);
+            should_close = true;
+        }
+        else if (!user_it->second->is_keep_alive()) {
+            // 短连接，响应发送完毕后关闭
+            LOG_DEBUG("Short connection, response sent: fd=%d", sockfd);
+            should_close = true;
+        }
+        // else: 长连接且对端未关闭，保持连接(已由write方法处理)
+
+        if (should_close) {
+            close_connection(timer, sockfd);
+        } else {
+            // 长连接，继续处理
+            if (timer){
+                adjust_timer(timer);
+            }
+        }
+    }
+    else if (write_result == 0) {
+        // 需要继续写，write方法内部已经注册了EPOLLOUT事件
+        // 只需要调整定时器
         if (timer){
-            adjust_timer(timer);     
+            adjust_timer(timer);
         }
     }
     else {
-        deal_timer(timer, sockfd);
+        // 写入失败(write_result == -1)，关闭连接
+        close_connection(timer, sockfd);
     }
-    
 }
 
 void WebServer::eventLoop(){
@@ -312,8 +439,11 @@ void WebServer::eventLoop(){
             // 处理连接异常或关闭
             else if (events[i].events & (EPOLLHUP | EPOLLERR)){
                 // 服务器端关闭连接，移除对应的定时器
-                util_timer * timer = users_client_data[sockfd].timer;
-                deal_timer(timer, sockfd);
+                auto client_it = m_clients.find(sockfd);
+                if (client_it != m_clients.end()) {
+                    util_timer * timer = client_it->second->timer;
+                    close_connection(timer, sockfd);
+                }
             }
             else if (events[i].events & EPOLLRDHUP) {
                 LOG_DEBUG("EPOLLRDHUP triggered for fd=%d", sockfd);
@@ -335,9 +465,15 @@ void WebServer::eventLoop(){
             }
         }
         if (timeout){
-            Utils::get_instance().timer_handler();
+            timer_handler();
            LOG_DEBUG("%s", "timer tick");
            timeout = false;
         }
     }
+}
+
+// WebServer工具方法已移至Utils类
+
+void WebServer::timer_handler(){
+    m_timer_wheel.tick();
 }
