@@ -22,8 +22,8 @@ Config::Config(){
     //数据库连接池数量,默认8
     sql_num = 8;
 
-    //子Reactor数量,默认4
-    thread_num = 4;
+    //子Reactor数量,默认3
+    thread_num = 3;
 
     //关闭日志,默认不关闭
     close_log = 0;

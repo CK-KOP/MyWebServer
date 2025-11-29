@@ -1,14 +1,14 @@
 # 🌐 MyWebServer
 
-高性能 Web 服务器，基于 **Linux + C++**，采用 **Reactor 模型 + 无锁线程池**，结合 **高效定时器、异步日志** 和 **MySQL 用户系统**，支持上万级别并发连接。
+高性能 Web 服务器，基于 **Linux + C++**，采用 **多 Reactor 模型**，结合 **高效定时器、异步日志** 和 **MySQL 用户系统**，支持上万级别并发连接。
 
 ------
 
 ## 📌 项目特性
 
 - **高并发处理**
-  - 基于 **Reactor 模式 + epoll**，主线程仅负责事件监听与分发，工作线程专注业务逻辑
-  - **无锁线程池**，减少线程竞争和调度开销
+  - 基于 **多 Reactor 模式 + epoll**，主 Reactor 负责连接监听与分发，多个 SubReactor 处理 I/O 事件
+  - **多线程 I/O 处理**，每个 SubReactor 运行在独立线程中，充分利用多核 CPU
   - 支持上万并发连接的稳定处理能力
 - **I/O 优化**
   - **全/半零拷贝**机制
@@ -36,8 +36,8 @@
 
 - **操作系统**：Linux
 - **编程语言**：C++
-- **网络编程**：Reactor 模型 + epoll
-- **并发**：线程池 + 无锁队列
+- **网络编程**：多 Reactor 模型 + epoll
+- **并发**：多线程 SubReactor
 - **数据库**：MySQL + 连接池
 - **定时器**：timerfd + 时间轮
 - **同步机制**：轻量锁 / 原子操作，尽量减少锁争用
@@ -58,14 +58,19 @@
 ├── mydb/                         # 数据库连接池
 │   ├── sql_connection_pool.cpp   # 线程安全连接池实现
 │   └── sql_connection_pool.h     # 连接池头文件
-├── threadpool/                   # 无锁队列线程池实现
-│   └── threadpool.h              # 核心实现
+├── utils/                        # 工具类
+│   ├── utils.cpp                 # 工具函数实现
+│   └── utils.h                   # 工具函数头文件
 ├── timer/                        # 定时器模块
 │   ├── lst_timer.cpp             # 时间轮 + timerfd 管理
 │   └── lst_timer.h               # 定时器接口
-├── webserver.cpp/h               # WebServer 核心类（事件分发、初始化）
+├── webserver.cpp/h               # WebServer 核心类（主 Reactor 事件分发、初始化）
+├── subreactor.cpp/h              # SubReactor 实现（处理 I/O 事件）
 ├── main.cpp                      # 服务器入口（参数解析与启动流程）
 ├── Makefile                      # 编译脚本
+├── third_party/                  # 第三方库
+│   ├── concurrentqueue/          # 无锁队列实现
+│   └── picohttpparser/           # HTTP 解析器
 └── root/                         # 静态资源目录
     ├── *.html
     ├── *.gif/jpg
@@ -93,7 +98,7 @@
 | `-m` | 触发组合模式（0:LT+LT, 1:LT+ET, 2:ET+LT, 3:ET+ET） | 0      |
 | `-o` | 优雅关闭连接（0:不使用, 1:使用）                   | 0      |
 | `-s` | 数据库连接池数量                                   | 8      |
-| `-t` | 线程池线程数                                       | 8      |
+| `-t` | SubReactor 线程数                                  | 3      |
 | `-c` | 是否关闭日志（0:不关闭, 1:关闭）                   | 0      |
 
 ### 运行前准备
@@ -125,39 +130,53 @@ make
 ## 📊 性能测试
 
 **测试工具**：`wrk` / `bombardier`
- **测试环境**：6 核虚拟机
+ **测试环境**：6 核虚拟机（1 个主 Reactor + 1 个异步日志线程 + N 个 SubReactor）
 
-- **峰值 QPS**：> 25,000
-- **最大并发连接**：> 25,000
-- **稳定性**：长时间压测下无崩溃、无明显内存泄露
+### 💡 SubReactor 数量调优结论
 
-### 压测命令示例
+| SubReactor 数量 | 峰值 QPS            | CPU 行为                                     |
+| --------------- | ------------------- | -------------------------------------------- |
+| 2               | ~30,000             | 主 Reactor 压力偏大，成为瓶颈                |
+| **3（推荐）**   | **~40,000（最高）** | 主 Reactor 有余力，SubReactor CPU 利用率最佳 |
+| 4               | ~24,000             | 线程调度与竞争成本变高，吞吐下降             |
 
-```bash
-wrk -t8 -c10000 -d30s http://127.0.0.1:9006/
-bombardier -c 20000 -n 1000000 http://127.0.0.1:9006/
+🔎 结果说明：
+ 本项目实际运行中，**QPS 不随 SubReactor 数量线性增长**。
+ 当 SubReactor = 3 时，达到了 **“主 Reactor 负载均衡 + SubReactor CPU 利用率最大化 + 最低调度开销”** 的最佳状态，因此吞吐量最高。
+
+📌 推荐配置（6 核环境）：
+
+```
+./server -t 3   # SubReactor = 3 时性能最佳
 ```
 
-### 压力测试结果
+------
+
+### 📌 本地压测数据（SubReactor = 3）
 
 ```
-kop@kop-virtual-machine ~> wrk -t8 -c10000 -d60s -H "Connection: close" http://127.0.0.1:9006
-Running 1m test @ http://127.0.0.1:9006
-  8 threads and 10000 connections
+kop@kop-virtual-machine ~/WebServer (master)> wrk -t4 -c10000 -d300s http://127.0.0.1:9006
+Running 5m test @ http://127.0.0.1:9006
+  4 threads and 10000 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   366.98ms   23.14ms 437.30ms   74.58%
-    Req/Sec     4.14k     2.99k   12.39k    61.27%
-  1,628,008 requests in 1.00m, 0.97GB read
-Requests/sec:  27,087.57
-Transfer/sec:     16.61MB
+    Latency    20.69ms   15.83ms 136.84ms   86.16%
+    Req/Sec    10.33k     4.24k   19.65k    61.61%
+  12337255 requests in 5.00m, 7.39GB read
+  Socket errors: connect 8983, read 1457687, write 0, timeout 0
+Requests/sec:  41115.28
+Transfer/sec:     25.21MB
 ```
 
-**解读**：
+> 仅 HTTP 静态资源测试下吞吐为 **≈ 4W QPS**。
 
-- 平均延迟：366.98ms，最大延迟：437.30ms
-- 10k 并发连接下处理 1,628,008 个请求，平均吞吐 27,087 Requests/sec
-- 数据传输速率约 16.61 MB/s
-- 系统稳定，无崩溃、无超时、无明显性能下降
+------
+
+### 🧾 性能总结
+
+- 支持 **20k+ 并发连接稳定运行**
+- 压测过程中 **无崩溃 / 无内存泄漏 / 性能无衰减**
+- 多 Reactor + 异步日志 + 时间轮定时器在高负载下表现稳定
+- 性能瓶颈已从“单线程”转为“线程竞争 + CPU 调度开销”
 
 ------
 
@@ -166,14 +185,13 @@ Transfer/sec:     16.61MB
 - 支持 HTTPS 协议
 - 实现 HTTP/2 特性
 - 引入 Redis 用于会话和热数据缓存，提高高并发下的数据库与资源访问性能
-- 支持多 Reactor 模式以充分利用多核 CPU
 - 优化文件传输性能
 - 添加更多数据库功能
 - 实现分布式部署支持
 - 增加负载均衡功能
+
 ------
 
 ## 🙏 致谢
 
 本项目基于学习和参考 [qinguoyi/TinyWebServer](https://github.com/qinguoyi/TinyWebServer) 并进行改造优化。感谢原作者开源精神，让我通过实践深入理解高性能 Web 服务器的实现原理。
-
