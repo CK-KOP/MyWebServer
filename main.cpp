@@ -15,7 +15,7 @@ int main(int argc, char *argv[]){
 
     // 初始化
     server.init(config.PORT, user, passwd, databasename, config.LOGWrite,
-                config.OPT_LINGER, config.TRIGMode,  config.sql_num,
+                config.OPT_LINGER, config.TRIGMode,  config.sql_num, config.thread_num,
                 config.close_log);
 
     //日志
@@ -26,16 +26,22 @@ int main(int argc, char *argv[]){
 
     //触发模式
     server.trig_mode();
-    
+
+    // 创建并启动SubReactors
+    server.create_sub_reactors();
+
     //printf("即将进入监听\n");
 
     //监听
     server.eventListen();
-    
+
+    // 启动所有SubReactors
+    server.start_sub_reactors();
+
     //printf("进入监听\n");
-    
+
     //printf("即将进入运行\n");
-    //运行
+    //运行主Reactor事件循环
     server.eventLoop();
     //printf("进入运行\n");
 

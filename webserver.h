@@ -20,6 +20,7 @@
 #include "./http/http_conn.h"
 #include "./timer/lst_timer.h"
 #include "./utils/utils.h"
+#include "./subreactor.h"
 
 const int MAX_FD = 65536;           // 最大文件描述符
 const int MAX_EVENT_NUMBER = 10000; // 最大事件数
@@ -32,27 +33,26 @@ public:
 
     // 初始化
     void init(int port, std::string user, std::string passWord, std::string databaseName,
-              int log_write, int opt_linger, int trigmode, int sql_num,
+              int log_write, int opt_linger, int trigmode, int sql_num, int thread_num,
               int close_log);
     void log_write();
     void sql_pool();
     void trig_mode();
 
-    // 关于用户http类数据以及定时器的相关函数
-    void create_timer(int connfd, struct sockaddr_in client_address);
-    void adjust_timer(util_timer *timer);
-    void close_connection(util_timer * timer, int sockfd);
-    void close_connection_by_timer(int sockfd);  // 定时器回调调用的版本，不删除定时器
-    
-    // 关于新客户端连接、客户端数据读写的处理函数
+    // 创建并启动SubReactors
+    void create_sub_reactors();
+
+    // 启动和停止所有SubReactors
+    void start_sub_reactors();
+    void stop_sub_reactors();
+
+    // 主Reactor：处理新客户端连接
     bool dealclientdata();
-    void dealwithread(int sockfd);
-    void dealwithwrite(int sockfd);
 
-    // 定时器方法
-    void timer_handler();
+    // 连接分发
+    bool dispatch_connection(int connfd, struct sockaddr_in client_address);
 
-    // epoll注册创建以及事件循环
+    // epoll注册创建以及事件循环（主Reactor）
     void eventListen();
     void eventLoop();
     
@@ -63,15 +63,7 @@ public:
     int m_log_write;    // 日志方法 0为同步，1为异步
     int m_close_log;    // 是否关闭日志
 
-    int m_epollfd;
-    int m_timerfd;
-
-    // 客户端连接管理 - 使用智能指针管理生命周期
-    std::unordered_map<int, std::unique_ptr<http_conn>> m_users;
-    std::unordered_map<int, std::unique_ptr<client_data>> m_clients;
-
-    // 连接计数管理
-    std::atomic<int> m_user_count{0};
+    int m_epollfd;  // 主Reactor的epollfd
 
     // 数据库相关
     connection_pool *m_connPool;
@@ -80,7 +72,11 @@ public:
     std::string m_databaseName;  // 使用数据库名
     int m_sql_num;
 
-    //epoll_event相关
+    // SubReactor相关
+    int m_thread_num;            // SubReactor线程数
+    std::vector<std::unique_ptr<SubReactor>> m_sub_reactors;  // SubReactor数组
+
+    //epoll_event相关（主Reactor用）
     epoll_event events[MAX_EVENT_NUMBER];
 
     int m_listenfd;
@@ -89,8 +85,8 @@ public:
     int m_LISTENTrigmode;
     int m_CONNTrigmode;
 
-    // 时间轮 - 从Utils移过来
-    TimingWheel m_timer_wheel;
+    // 连接分发 - 轮询算法
+    std::atomic<int> m_next_sub_reactor{0};
 };
 
 #endif
